@@ -1,0 +1,25 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+
+# Logs
+*.log
+
+# Obsidian docs
+cms-project-docs

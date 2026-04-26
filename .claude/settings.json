@@ -1,0 +1,62 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm:*)",
+      "Bash(pnpx:*)",
+      "Bash(npx:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(rg:*)",
+      "Bash(tree:*)",
+      "Bash(node:*)",
+      "Bash(tsc:*)",
+      "Bash(vitest:*)",
+      "Bash(drizzle-kit:*)",
+      "Bash(unbuild:*)",
+      "Bash(vite:*)",
+      "Bash(mkdir:*)",
+      "Bash(touch:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(npm publish:*)",
+      "Bash(pnpm publish:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$file\" | grep -qE '\\.(ts|vue)$'; then cd \"$(dirname \"$file\")\" && pnpm -w typecheck 2>&1 | tail -20; fi",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Session ended. Reminder: commit if you wrote code.'"
+          }
+        ]
+      }
+    ]
+  }
+}
