@@ -28,7 +28,6 @@ pnpm typecheck        # typecheck all packages
 
 # Per-package
 pnpm --filter @kurvo/core test
-pnpm --filter @kurvo/storage test
 pnpm --filter @kurvo/vue test
 
 # Verify before claiming done
@@ -46,14 +45,12 @@ Layer 3 — @kurvo/backend      Opt-in. Rich admin UI (V3)
 Layer 4 — @kurvo/plugin-*     Opt-in. Plugins ecosystem (V4+)
 ```
 
-V1 ships 3 packages:
+V1 ships 2 packages:
 
 ```
 @kurvo/core       → TS pure, zero Vue/DOM/Node deps. Types, defineBlock(), fields.x() helpers,
                     state (@vue/reactivity), serialization, validation, event bus.
                     Deps: @vue/reactivity, nanoid, zod.
-@kurvo/storage    → StorageAdapter interface + memory adapter. No heavy deps.
-                    The dev plugs their own DB via the interface. JSON output from editor.
 @kurvo/vue        → <KurvoEditor /> component + <DocumentRenderer> (light sub-export).
   ./editor        → Heavy admin UI sub-export (canvas, inspector, dnd, tiptap, images-only assets).
 ```
@@ -72,8 +69,7 @@ V1 ships 3 packages:
 | Package | May depend on | Must NOT depend on |
 |---|---|---|
 | `core` | `@vue/reactivity`, `nanoid`, `zod` only | Vue components, DOM, Node-specific, fetch |
-| `storage` | `core` | Vue, DOM |
-| `vue` | `core`, `storage` (interface) | — |
+| `vue` | `core` | — |
 
 ### Data flow (V1)
 
@@ -92,6 +88,28 @@ User action → Editor UI → core state (reactive) → JSON output
 - **Field DX**: schema-first via `defineBlock()` + `fields.x()` helpers. Type inference via `InferBlockProps<typeof Block>`. No codegen.
 - **Assets V1**: images only (JPG, PNG, WebP, GIF). No `fields.file()`. No SVG.
 - **Composables**: prefixed `useKurvoX()`, return `{ data, isLoading, error, refresh }`, filter object signature.
+
+## Commit Convention (Conventional Commits, enforced by commitlint)
+
+Format: `<type>(<scope>): <description>`
+
+Types: `feat`, `fix`, `refactor`, `chore`, `docs`, `test`, `style`, `perf`, `ci`, `build`, `revert`
+Scopes: `core`, `vue`, `editor`, `deps`, `ci`, `release` (required by warning, enforced list)
+
+Rules:
+- Imperative present tense in English ("add", not "added")
+- Subject line < 72 chars, no capital after `:`, no trailing period
+- Scope should match the package or area affected
+
+Examples:
+```
+chore: initial monorepo setup with pnpm workspaces
+feat(core): add defineBlock and field helpers
+fix(vue): prevent duplicate block ids on drop
+test(core): add unit tests for BlockTree operations
+refactor(editor): extract sidebar into composable
+chore(deps): bump vitest to 4.2.0
+```
 
 ## Coding Conventions
 
