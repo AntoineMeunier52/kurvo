@@ -26,3 +26,6 @@ cms-project-docs
 
 # Claude
 settings.local.json
+
+# Scratch / playground
+**/scratch/
