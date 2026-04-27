@@ -2,3 +2,5 @@
 // TypeScript pure, zero Vue/DOM/Node deps.
 
 export const VERSION = '0.1.0'
+
+export type * from './types'
