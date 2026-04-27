@@ -35,5 +35,12 @@ export default tseslint.config(
     },
   },
 
+  {
+    files: ['packages/core/**'],
+    rules: {
+      'vue/prefer-import-from-vue': 'off',
+    },
+  },
+
   prettier,
 )
