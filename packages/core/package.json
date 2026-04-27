@@ -22,7 +22,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vue/reactivity": "^3.5.0",
+    "@vue/reactivity": "^3.5.33",
     "nanoid": "^5.1.0",
     "zod": "^3.25.0"
   },
