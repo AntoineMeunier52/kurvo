@@ -23,3 +23,6 @@ Thumbs.db
 
 # Obsidian docs
 cms-project-docs
+
+# Claude
+settings.local.json
