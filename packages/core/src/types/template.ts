@@ -1,4 +1,4 @@
-import type { DocumentMeta } from './meta'
+import type { PageMeta } from './meta'
 
 export interface TemplateDefinition<TData = unknown> {
   name: string
@@ -7,7 +7,6 @@ export interface TemplateDefinition<TData = unknown> {
   category?: string
   icon?: string
   preview?: string
-  collection?: string
   defaultData: TData
-  defaultMeta?: DocumentMeta
+  defaultMeta?: PageMeta
 }

@@ -1,9 +1,11 @@
 import type { FieldDefinition } from './field'
 
 /**
- * @internal V1 — public V2 (cf cms-project-docs/04-architecture/Surface partagee V1 V2.md decision #3).
- * The type is exposed V1 (consumed by `definePageCollection`'s return type),
- * but the `defineCollection()` function will not be re-exported from the public surface until V2.
+ * @internal
+ *
+ * Le concept de Collection est strictement interne en V1. La seule collection geree est `pages`,
+ * implicitement, sans surface publique. Conservation du type pour preparer V2 headless
+ * (cf cms-project-docs/04-architecture/Surface partagee V1 V2.md). Ne pas re-exporter depuis `index.ts`.
  */
 export interface CollectionDefinition<TData = unknown> {
   name: string

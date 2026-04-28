@@ -14,7 +14,7 @@ export interface OgMeta {
   ogType?: 'website' | 'article'
 }
 
-export interface DocumentMeta {
+export interface PageMeta {
   seo?: SeoMeta
   og?: OgMeta
 }
