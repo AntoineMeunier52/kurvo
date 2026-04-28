@@ -1,27 +1,27 @@
 import type { Block, BlockId } from './block'
 
 /**
- * Identifiant unique d'un slot dans un Document.
+ * Unique identifier for a slot inside a Page.
  *
  * Format: `${BlockId | 'root'}:${slotName}`.
- * Le pseudo-block `'root'` represente la racine du Document (le tableau `Page.blocks`).
- * Convention: `'root'` n'expose qu'un seul slot, nomme par {@link ROOT_SLOT_NAME}.
+ * The pseudo-block `'root'` represents the Page root (the `Page.blocks` array).
+ * Convention: `'root'` exposes a single slot, named by {@link ROOT_SLOT_NAME}.
  *
- * Exemples:
- *   - `'root:default'`     — racine du Document
- *   - `'blk_8f3k:cta'`     — slot `cta` du Block `blk_8f3k`
+ * Examples:
+ *   - `'root:default'`     — Page root
+ *   - `'blk_8f3k:cta'`     — slot `cta` of Block `blk_8f3k`
  */
 export type SlotKey = `${BlockId | 'root'}:${string}`
 
-/** Nom conventionnel du slot racine, expose uniquement par le pseudo-block `'root'`. */
+/** Conventional name of the root slot, exposed only by the pseudo-block `'root'`. */
 export const ROOT_SLOT_NAME = 'default'
 
-/** SlotKey racine du Document. */
+/** Root SlotKey of the Page. */
 export const ROOT_SLOT_KEY: SlotKey = `root:${ROOT_SLOT_NAME}`
 
 /**
- * Cible d'insertion: `{ slot, index }`.
- * Si `index` est omis, insertion en fin de slot.
+ * Insertion target: `{ slot, index }`.
+ * If `index` is omitted, insertion happens at the end of the slot.
  */
 export interface Target {
   slot: SlotKey
@@ -29,18 +29,21 @@ export interface Target {
 }
 
 /**
- * Operations atomiques applicables a l'arbre de Blocks.
+ * Atomic operations applicable to the Block tree.
  *
- * Discrimine par `op`. Chaque operation est completement reversible: appliquer sa transformation
- * inverse (cf {@link HistoryEntry}) restaure l'etat precedent.
+ * Discriminated by `op`. Each operation is fully reversible: applying its inverse transformation
+ * (see {@link HistoryEntry}) restores the previous state.
  *
- * Contrats:
- *   - `insert`: `block.id` doit etre globalement unique dans le Document.
- *   - `move`: deplace un block existant. Interdit si `target` est descendant de `id` (cycle).
- *   - `remove`: supprime le block et tout son sous-arbre.
- *   - `reorder`: change l'ordre dans un slot existant.
- *   - `replace`: remplace un block (meme id) par un autre. Conserve les enfants si `keepChildren`.
- *   - `updateProps`: patch shallow des props.
+ * Contracts:
+ *   - `insert`: `block.id` must be globally unique within the Document.
+ *   - `move`: moves an existing block. Forbidden if `target` is a descendant of `id` (cycle).
+ *   - `remove`: removes the block and its entire subtree.
+ *   - `reorder`: changes the order within an existing slot.
+ *   - `replace`: replaces a block (same id) with another. Keeps children if `keepChildren`.
+ *   - `updateFields`: shallow patch of fields. `set` writes/overwrites keys, `unset` deletes keys.
+ *     Both are optional. If a key appears in both, `set` wins (defined behavior, not validated).
+ *     This shape is JSON-safe (no `undefined` sentinels), so ops can transit through
+ *     `postMessage`, `BroadcastChannel`, or persistence layers without losing information.
  */
 export type TreeOperation =
   | { op: 'insert'; block: Block; target: Target }
@@ -48,4 +51,9 @@ export type TreeOperation =
   | { op: 'remove'; id: BlockId }
   | { op: 'reorder'; slot: SlotKey; from: number; to: number }
   | { op: 'replace'; id: BlockId; block: Block; keepChildren?: boolean }
-  | { op: 'updateProps'; id: BlockId; props: Record<string, unknown> }
+  | {
+      op: 'updateFields'
+      id: BlockId
+      set?: Record<string, unknown>
+      unset?: readonly string[]
+    }
