@@ -118,6 +118,7 @@ chore(deps): bump vitest to 4.2.0
 - Tests mirror source in `test/` folders. `.test-d.ts` for type-level tests.
 - `index.ts` of each package = strict public API surface. Internal modules not importable cross-package.
 - Comments only when WHY is non-obvious. Never WHAT.
+- All comments (inline, JSDoc, TODO, etc.) MUST be written in English.
 - `@vue/reactivity` imports centralized in `core/src/state/reactive.ts` (single file to touch if migrating).
 
 ## Workflow

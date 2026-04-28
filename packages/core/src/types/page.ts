@@ -4,10 +4,10 @@ import type { PageMeta } from './meta'
 export type PageStatus = 'draft' | 'published'
 
 /**
- * Une **Page** est l'unite editable V1.
+ * A **Page** is the V1 editable unit.
  *
- * Surface plate (pas de wrapper `Document<TData>` en V1). La structure Document/Collection generique
- * existe en interne (cf `document.ts`) pour preparer V2 headless mais n'est pas exposee.
+ * Flat surface (no `Document<TData>` wrapper in V1). The generic Document/Collection structure
+ * exists internally (see `document.ts`) to prepare V2 headless but is not exposed.
  */
 export interface Page {
   id: string

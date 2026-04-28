@@ -3,15 +3,15 @@ import type { PageMeta } from './meta'
 /**
  * @internal
  *
- * V1 ne traite que la collection `pages` (cf {@link Page}). Le concept de Document/Collection generique
- * est conserve dans le code prive pour preparer le mode headless V2 (cf
- * cms-project-docs/04-architecture/Surface partagee V1 V2.md), mais n'est jamais expose dans la surface
- * publique V1.
+ * V1 only handles the `pages` collection (see {@link Page}). The generic Document/Collection concept
+ * is kept in private code to prepare V2 headless mode (see
+ * cms-project-docs/04-architecture/Surface partagee V1 V2.md), but is never exposed in the
+ * V1 public surface.
  */
 export type DocumentStatus = 'draft' | 'published'
 
 /**
- * @internal Voir note ci-dessus. Ne pas re-exporter depuis `index.ts`.
+ * @internal See note above. Do not re-export from `index.ts`.
  */
 export interface Document<TData = Record<string, unknown>> {
   id: string

@@ -1,12 +1,11 @@
 /**
- * Definition d'une Library: un groupe nomme de Blocks pour la categorisation dans la Palette
- * de l'editor.
+ * Definition of a Library: a named group of Blocks for categorization in the editor's Palette.
  *
- * Voir cms-project-docs/04-architecture/Refonte API V1.md §Library.
+ * See cms-project-docs/04-architecture/Refonte API V1.md §Library.
  */
 
-// `BlockDefinition` n'est pas encore implemente (Phase 1, sous-tache `defineBlock`). On le declare
-// en placeholder ici via `unknown` pour eviter une dep circulaire prematuree. Sera retypee en
+// `BlockDefinition` is not yet implemented (Phase 1, sub-task `defineBlock`). Declared as a
+// placeholder via `unknown` to avoid a premature circular dep. Will be retyped to
 // `BlockDefinition` once that exists.
 
 export interface LibraryDefinition {

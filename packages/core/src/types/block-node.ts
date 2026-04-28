@@ -4,13 +4,13 @@ import type { SlotKey } from './operations'
 /**
  * @internal
  *
- * Vue indexee d'un Block dans l'arbre. Conserve dans la `Map<BlockId, BlockNode>` maintenue par
- * `BlockTree`. Permet:
- *   - lookup O(1) d'un block par id
- *   - resolution O(1) du parent
- *   - calcul de path en remontant les `parent`
+ * Indexed view of a Block within the tree. Stored in the `Map<BlockId, BlockNode>` maintained by
+ * `BlockTree`. Enables:
+ *   - O(1) lookup of a block by id
+ *   - O(1) parent resolution
+ *   - path computation by walking up `parent`
  *
- * Pas exposee dans la surface publique: l'API user ne manipule que `Block` (forme JSON).
+ * Not exposed in the public surface: the user API only manipulates `Block` (JSON form).
  */
 export interface BlockNode {
   block: Block
