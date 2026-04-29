@@ -26,6 +26,7 @@ cms-project-docs
 
 # Claude
 settings.local.json
+.claude/.last-review
 
 # Scratch / playground
 **/scratch/

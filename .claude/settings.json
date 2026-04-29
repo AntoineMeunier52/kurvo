@@ -55,6 +55,11 @@
             "type": "command",
             "command": "echo 'Session ended. Reminder: commit if you wrote code.'"
           }
+          // {
+          //   "type": "command",
+          //   "command": ".claude/hooks/should-review.sh",
+          //   "timeout": 120
+          // }
         ]
       }
     ]
