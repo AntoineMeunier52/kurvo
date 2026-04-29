@@ -57,3 +57,24 @@ export type TreeOperation =
       set?: Record<string, unknown>
       unset?: readonly string[]
     }
+
+/**
+ * Position of a block within its parent, returned by a {@link Locator}.
+ * `parentId === null` means the block lives at the document root (top-level array).
+ */
+export interface LocatorInfo {
+  parentId: BlockId | null
+  slot: string | null
+  index: number
+}
+
+/**
+ * Optional O(1) lookup callback that an external indexer (typically `BlockTree`)
+ * can pass to `applyOperation` to skip the recursive walk. When provided, mutation
+ * ops use the spine-rebuild path (O(depth)) instead of the tree-walk path (O(N)).
+ *
+ * Contract: returning `null` means "this id does not exist in the indexer's view".
+ * `applyOperation` will throw "block not found" without falling back to a walk —
+ * callers that pass a locator are responsible for keeping it in sync with the tree.
+ */
+export type Locator = (id: BlockId) => LocatorInfo | null

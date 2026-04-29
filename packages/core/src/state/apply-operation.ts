@@ -1,4 +1,4 @@
-import type { Block, BlockId, SlotKey, Target } from '../types'
+import type { Block, BlockId, Locator, SlotKey, Target } from '../types'
 import type { TreeOperation } from '../types'
 import { ROOT_SLOT_KEY, ROOT_SLOT_NAME } from '../types'
 
@@ -7,6 +7,11 @@ import { ROOT_SLOT_KEY, ROOT_SLOT_NAME } from '../types'
  *
  * Pure function: no mutation of the input, returns a fresh tree plus the inverse operation
  * (used to seed history entries).
+ *
+ * If a {@link Locator} is provided, ops that locate a block by id use the **spine-rebuild**
+ * path (O(depth)) instead of recursive tree walks (O(N)). Without a locator, behavior is
+ * identical to a pure walk-based implementation. A locator that returns `null` for an id
+ * causes a "block not found" throw — the function does NOT fall back to a walk.
  *
  * @remarks
  * Block id uniqueness across the tree is the **caller's responsibility** (typically `BlockTree`).
@@ -18,26 +23,30 @@ import { ROOT_SLOT_KEY, ROOT_SLOT_NAME } from '../types'
 export const applyOperation = (
   blocks: Block[],
   op: TreeOperation,
+  locator?: Locator,
 ): { blocks: Block[]; inverse: TreeOperation } => {
   switch (op.op) {
     case 'updateFields':
-      return applyUpdateFields(blocks, op)
+      return applyUpdateFields(blocks, op, locator)
     case 'reorder':
-      return applyReorder(blocks, op)
+      return applyReorder(blocks, op, locator)
     case 'replace':
-      return applyReplace(blocks, op)
+      return applyReplace(blocks, op, locator)
     case 'insert':
-      return applyInsert(blocks, op)
+      return applyInsert(blocks, op, locator)
     case 'remove':
-      return applyRemove(blocks, op)
+      return applyRemove(blocks, op, locator)
     case 'move':
-      return applyMove(blocks, op)
+      return applyMove(blocks, op, locator)
   }
 }
+
+// ─── Op handlers ──────────────────────────────────────────────────────────
 
 const applyUpdateFields = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'updateFields' }>,
+  locator?: Locator,
 ): { blocks: Block[]; inverse: TreeOperation } => {
   const set = op.set ?? {}
   // `undefined` values in `set` would be lost across JSON serialization and break the
@@ -53,7 +62,7 @@ const applyUpdateFields = (
   // upfront so the loops below cannot interact through coincidental ordering.
   const unset = (op.unset ?? []).filter((k) => !Object.hasOwn(set, k))
 
-  const { blocks: next, oldBlock } = mapBlock(blocks, op.id, (block) => {
+  const updater = (block: Block): Block => {
     const newFields: Record<string, unknown> = { ...block.fields }
     for (const key of unset) {
       Reflect.deleteProperty(newFields, key)
@@ -62,7 +71,11 @@ const applyUpdateFields = (
       newFields[key] = value
     }
     return { ...block, fields: newFields }
-  })
+  }
+
+  const { blocks: next, oldBlock } = locator
+    ? mapBlockSpine(blocks, op.id, updater, locator)
+    : mapBlock(blocks, op.id, updater)
 
   if (oldBlock === null) {
     throw new Error(`applyOperation/updateFields: block "${op.id}" not found`)
@@ -97,6 +110,7 @@ const applyUpdateFields = (
 const applyReorder = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'reorder' }>,
+  locator?: Locator,
 ): { blocks: Block[]; inverse: TreeOperation } => {
   const { from, to, slot } = op
   const inverse: TreeOperation = { op: 'reorder', slot, from: to, to: from }
@@ -110,8 +124,6 @@ const applyReorder = (
   }
 
   // Move-style: splice out at `from`, splice in at `to`.
-  // Spread keeps the splice typesafe under noUncheckedIndexedAccess
-  // (a destructured `[removed]` would be `Block | undefined`).
   const reorderArray = (arr: Block[]): Block[] => {
     checkBounds(arr, from, 'from')
     checkBounds(arr, to, 'to')
@@ -123,14 +135,13 @@ const applyReorder = (
 
   const { blockId, slotName } = resolveSlotKey(slot)
 
-  // Root slot: splice the root array directly.
+  // Root slot: splice the root array directly. No locator needed.
   if (blockId === 'root') {
     if (slotName !== ROOT_SLOT_NAME) {
       throw new Error(
         `applyOperation/reorder: invalid root slot "${slotName}" (expected "${ROOT_SLOT_NAME}")`,
       )
     }
-    // Bounds-validate even on no-op to catch malformed input early.
     checkBounds(blocks, from, 'from')
     checkBounds(blocks, to, 'to')
     if (from === to) return { blocks, inverse }
@@ -138,12 +149,11 @@ const applyReorder = (
   }
 
   // Nested slot: navigate to the parent block, transform its slot.
-  const { blocks: next, oldBlock } = mapBlock(blocks, blockId, (block) => {
+  const updater = (block: Block): Block => {
     const children = block.slots?.[slotName]
     if (!children) {
       throw new Error(`applyOperation/reorder: slot "${slot}" not found on block "${blockId}"`)
     }
-    // Bounds-validate even on no-op to catch malformed input early.
     checkBounds(children, from, 'from')
     checkBounds(children, to, 'to')
     if (from === to) return block
@@ -151,7 +161,11 @@ const applyReorder = (
       ...block,
       slots: { ...block.slots, [slotName]: reorderArray(children) },
     }
-  })
+  }
+
+  const { blocks: next, oldBlock } = locator
+    ? mapBlockSpine(blocks, blockId, updater, locator)
+    : mapBlock(blocks, blockId, updater)
 
   if (oldBlock === null) {
     throw new Error(`applyOperation/reorder: block "${blockId}" not found`)
@@ -163,6 +177,7 @@ const applyReorder = (
 const applyReplace = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'replace' }>,
+  locator?: Locator,
 ): { blocks: Block[]; inverse: TreeOperation } => {
   if (op.block.id !== op.id) {
     throw new Error(
@@ -170,10 +185,7 @@ const applyReplace = (
     )
   }
 
-  const { blocks: next, oldBlock } = mapBlock(blocks, op.id, (existing) => {
-    // keepChildren preserves `existing.slots` verbatim. If existing had no slots and
-    // op.block provided some, those are discarded — children are not invented out
-    // of nowhere. The flag means "keep what was there", not "merge".
+  const updater = (existing: Block): Block => {
     if (op.keepChildren) {
       const result: Block = { ...op.block }
       if (existing.slots) {
@@ -184,7 +196,11 @@ const applyReplace = (
       return result
     }
     return op.block
-  })
+  }
+
+  const { blocks: next, oldBlock } = locator
+    ? mapBlockSpine(blocks, op.id, updater, locator)
+    : mapBlock(blocks, op.id, updater)
 
   if (oldBlock === null) {
     throw new Error(`applyOperation/replace: block "${op.id}" not found`)
@@ -206,8 +222,11 @@ const applyReplace = (
 const applyInsert = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'insert' }>,
+  locator?: Locator,
 ): { blocks: Block[]; inverse: TreeOperation } => {
-  const next = insertBlockInTree(blocks, op.block, op.target)
+  const next = locator
+    ? insertBlockInTreeSpine(blocks, op.block, op.target, locator)
+    : insertBlockInTree(blocks, op.block, op.target)
   const inverse: TreeOperation = { op: 'remove', id: op.block.id }
   return { blocks: next, inverse }
 }
@@ -215,14 +234,16 @@ const applyInsert = (
 const applyRemove = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'remove' }>,
+  locator?: Locator,
 ): { blocks: Block[]; inverse: TreeOperation } => {
-  const { blocks: next, removed } = removeBlockFromTree(blocks, op.id)
+  const { blocks: next, removed } = locator
+    ? removeBlockFromTreeSpine(blocks, op.id, locator)
+    : removeBlockFromTree(blocks, op.id)
+
   if (removed === null) {
     throw new Error(`applyOperation/remove: block "${op.id}" not found`)
   }
 
-  // structuredClone so the inverse is independent from the live tree
-  // (re-inserting a stale ref then mutating it would corrupt history).
   const inverse: TreeOperation = {
     op: 'insert',
     block: structuredClone(removed.block),
@@ -235,8 +256,13 @@ const applyRemove = (
 const applyMove = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'move' }>,
+  locator?: Locator,
 ): { blocks: Block[]; inverse: TreeOperation } => {
-  const { blocks: afterRemove, removed } = removeBlockFromTree(blocks, op.id)
+  const removeResult = locator
+    ? removeBlockFromTreeSpine(blocks, op.id, locator)
+    : removeBlockFromTree(blocks, op.id)
+
+  const { blocks: afterRemove, removed } = removeResult
   if (removed === null) {
     throw new Error(`applyOperation/move: block "${op.id}" not found`)
   }
@@ -249,7 +275,15 @@ const applyMove = (
     )
   }
 
-  const next = insertBlockInTree(afterRemove, removed.block, op.target)
+  // The locator was built from the OLD tree. After remove, the position of every
+  // block OUTSIDE the removed subtree is unchanged (parentId/slot/index are stable
+  // because we only spliced one element from the source's parent slot, and the
+  // source's parent isn't a descendant of the source). The cycle check above
+  // guarantees target.blockId is outside the removed subtree, so the locator
+  // remains valid for it.
+  const next = locator
+    ? insertBlockInTreeSpine(afterRemove, removed.block, op.target, locator)
+    : insertBlockInTree(afterRemove, removed.block, op.target)
 
   const inverse: TreeOperation = {
     op: 'move',
@@ -259,6 +293,8 @@ const applyMove = (
 
   return { blocks: next, inverse }
 }
+
+// ─── Walk-based helpers (fallback when no locator is provided) ───────────
 
 /**
  * Recursively traverse the tree and replace the block matching `id` via `updater`.
@@ -274,8 +310,6 @@ const mapBlock = (
 ): { blocks: Block[]; oldBlock: Block | null } => {
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i]
-
-    // Skip array holes (defensive: noUncheckedIndexedAccess narrowing only).
     if (!block) continue
 
     if (block.id === id) {
@@ -319,21 +353,12 @@ const resolveSlotKey = (slotKey: SlotKey): { blockId: BlockId | 'root'; slotName
 }
 
 /**
- * Insert `block` at `target` immutably. Throws if the parent block does not exist
- * or the index is out of bounds. Auto-creates the slot entry if the parent had none.
+ * Insert `block` at `target` immutably (walk-based). Throws if the parent block does not
+ * exist or the index is out of bounds. Auto-creates the slot entry if the parent had none.
  */
 const insertBlockInTree = (blocks: Block[], block: Block, target: Target): Block[] => {
   const { slot, index } = target
   const { blockId, slotName } = resolveSlotKey(slot)
-
-  // Insert range is [0, length] inclusive (length = append).
-  const checkInsertBounds = (arr: Block[], idx: number, ctx: string): void => {
-    if (idx < 0 || idx > arr.length) {
-      throw new Error(
-        `applyOperation/insert: index=${idx} out of bounds (${ctx}, length ${arr.length})`,
-      )
-    }
-  }
 
   if (blockId === 'root') {
     if (slotName !== ROOT_SLOT_NAME) {
@@ -384,8 +409,6 @@ const removeBlockFromTree = (
 } => {
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i]
-
-    // Skip array holes (defensive: noUncheckedIndexedAccess narrowing only).
     if (!block) continue
 
     if (block.id === id) {
@@ -426,4 +449,277 @@ const subtreeContainsId = (block: Block, id: BlockId): boolean => {
     }
   }
   return false
+}
+
+const checkInsertBounds = (arr: Block[], idx: number, ctx: string): void => {
+  if (idx < 0 || idx > arr.length) {
+    throw new Error(
+      `applyOperation/insert: index=${idx} out of bounds (${ctx}, length ${arr.length})`,
+    )
+  }
+}
+
+// ─── Spine-based helpers (used when a Locator is provided) ───────────────
+
+interface ChainEntry {
+  blockId: BlockId
+  parentId: BlockId | null
+  slot: string | null
+  index: number
+}
+
+/**
+ * Assert that the block at `entry.index` in `blocks` matches `entry.blockId`.
+ * Returns the block when the locator is consistent, throws otherwise. Centralizes
+ * the drift-detection error message used by every spine helper.
+ */
+const assertChainConsistent = (blocks: Block[], entry: ChainEntry, context: string): Block => {
+  const block = blocks[entry.index]
+  if (!block || block.id !== entry.blockId) {
+    throw new Error(
+      `${context}: locator inconsistent — expected "${entry.blockId}" at index ${entry.index}, got "${block?.id ?? 'undefined'}"`,
+    )
+  }
+  return block
+}
+
+/**
+ * Resolve the child slot named by `childEntry.slot` on `block`. Used by every spine
+ * helper at inner depths: the chain guarantees the child block lives in this slot,
+ * so the slot must exist (even if empty arrays are valid in general).
+ *
+ * Uses `=== undefined` rather than truthiness to distinguish "slot inexistant" (bug)
+ * from "slot is an empty array" (valid in other contexts, but unreachable here).
+ */
+const resolveChildSlot = (
+  block: Block,
+  childEntry: ChainEntry,
+  context: string,
+): { childSlotName: string; childArray: Block[] } => {
+  if (childEntry.slot === null) {
+    throw new Error(`${context}: invalid child chain entry (slot is null)`)
+  }
+  const childSlotName = childEntry.slot
+  const childArray = block.slots?.[childSlotName]
+  if (childArray === undefined) {
+    throw new Error(
+      `${context}: locator inconsistent — block "${block.id}" has no slot "${childSlotName}"`,
+    )
+  }
+  return { childSlotName, childArray }
+}
+
+/**
+ * Walk UP from `id` to root via the locator, collecting one entry per ancestor.
+ * Returns the chain ordered root-first → leaf-last (so `chain[0]` is the
+ * root-level ancestor, `chain[N-1]` is the target block itself).
+ *
+ * Returns `null` if the locator returns `null` for any id along the chain.
+ *
+ * Implementation note: push + single reverse (O(N)) instead of unshift per step
+ * (O(N²) due to per-step reallocation). Matters for deep trees.
+ */
+const buildAncestorChain = (id: BlockId, locator: Locator): ChainEntry[] | null => {
+  const chain: ChainEntry[] = []
+  let currentId: BlockId | null = id
+
+  while (currentId !== null) {
+    const info = locator(currentId)
+    if (info === null) return null
+    chain.push({
+      blockId: currentId,
+      parentId: info.parentId,
+      slot: info.slot,
+      index: info.index,
+    })
+    currentId = info.parentId
+  }
+
+  return chain.reverse()
+}
+
+/**
+ * Locator-based replacement of `mapBlock`: rebuilds only the spine from root to leaf
+ * using the chain returned by the locator. O(depth) allocations vs O(N) for `mapBlock`.
+ *
+ * Throws on locator inconsistency (chain points to a block whose id differs from the
+ * tree's content at that position) — this catches stale-index bugs early.
+ */
+const mapBlockSpine = (
+  blocks: Block[],
+  id: BlockId,
+  updater: (block: Block) => Block,
+  locator: Locator,
+): { blocks: Block[]; oldBlock: Block | null } => {
+  const chain = buildAncestorChain(id, locator)
+  if (chain === null) return { blocks, oldBlock: null }
+
+  const rebuild = (currentBlocks: Block[], depth: number): { blocks: Block[]; oldBlock: Block } => {
+    const entry = chain[depth]
+    if (!entry) {
+      throw new Error(`mapBlockSpine: missing chain entry at depth ${depth}`)
+    }
+    const block = assertChainConsistent(currentBlocks, entry, 'mapBlockSpine')
+
+    if (depth === chain.length - 1) {
+      // Leaf — apply updater.
+      const next = currentBlocks.slice()
+      next[entry.index] = updater(block)
+      return { blocks: next, oldBlock: block }
+    }
+
+    // Inner — descend into the next chain entry's slot.
+    const childEntry = chain[depth + 1]
+    if (!childEntry) {
+      throw new Error(`mapBlockSpine: missing chain entry at depth ${depth + 1}`)
+    }
+    const { childSlotName, childArray } = resolveChildSlot(block, childEntry, 'mapBlockSpine')
+    const result = rebuild(childArray, depth + 1)
+    const next = currentBlocks.slice()
+    next[entry.index] = {
+      ...block,
+      slots: { ...block.slots, [childSlotName]: result.blocks },
+    }
+    return { blocks: next, oldBlock: result.oldBlock }
+  }
+
+  return rebuild(blocks, 0)
+}
+
+/**
+ * Locator-based replacement of `removeBlockFromTree`. Same contract, O(depth) allocs.
+ */
+const removeBlockFromTreeSpine = (
+  blocks: Block[],
+  id: BlockId,
+  locator: Locator,
+): {
+  blocks: Block[]
+  removed: { block: Block; parentSlot: SlotKey; index: number } | null
+} => {
+  const chain = buildAncestorChain(id, locator)
+  if (chain === null) return { blocks, removed: null }
+
+  const leaf = chain[chain.length - 1]
+  if (!leaf) {
+    throw new Error('removeBlockFromTreeSpine: empty chain')
+  }
+
+  // Invariant maintained by BlockTree.indexBlocks: parentId === null iff slot === null.
+  const parentSlot: SlotKey =
+    leaf.parentId === null ? ROOT_SLOT_KEY : `${leaf.parentId}:${leaf.slot}`
+
+  // Recursive rebuild that, at the leaf, splices out the index instead of replacing.
+  const rebuild = (currentBlocks: Block[], depth: number): { blocks: Block[]; removed: Block } => {
+    const entry = chain[depth]
+    if (!entry) {
+      throw new Error(`removeBlockFromTreeSpine: missing chain entry at depth ${depth}`)
+    }
+    const block = assertChainConsistent(currentBlocks, entry, 'removeBlockFromTreeSpine')
+
+    if (depth === chain.length - 1) {
+      // Leaf — splice it out.
+      const next = currentBlocks.slice()
+      next.splice(entry.index, 1)
+      return { blocks: next, removed: block }
+    }
+
+    const childEntry = chain[depth + 1]
+    if (!childEntry) {
+      throw new Error('removeBlockFromTreeSpine: missing child chain entry')
+    }
+    const { childSlotName, childArray } = resolveChildSlot(
+      block,
+      childEntry,
+      'removeBlockFromTreeSpine',
+    )
+    const result = rebuild(childArray, depth + 1)
+    const next = currentBlocks.slice()
+    next[entry.index] = {
+      ...block,
+      slots: { ...block.slots, [childSlotName]: result.blocks },
+    }
+    return { blocks: next, removed: result.removed }
+  }
+
+  const { blocks: next, removed } = rebuild(blocks, 0)
+  return { blocks: next, removed: { block: removed, parentSlot, index: leaf.index } }
+}
+
+/**
+ * Locator-based replacement of `insertBlockInTree`.
+ * Root insert is O(1) and skips the locator. Nested insert uses the chain to the parent.
+ */
+const insertBlockInTreeSpine = (
+  blocks: Block[],
+  block: Block,
+  target: Target,
+  locator: Locator,
+): Block[] => {
+  const { slot, index } = target
+  const { blockId, slotName } = resolveSlotKey(slot)
+
+  if (blockId === 'root') {
+    if (slotName !== ROOT_SLOT_NAME) {
+      throw new Error(
+        `applyOperation/insert: invalid root slot "${slotName}" (expected "${ROOT_SLOT_NAME}")`,
+      )
+    }
+    const idx = index ?? blocks.length
+    checkInsertBounds(blocks, idx, `slot "${slot}"`)
+    const next = blocks.slice()
+    next.splice(idx, 0, block)
+    return next
+  }
+
+  const chain = buildAncestorChain(blockId, locator)
+  if (chain === null) {
+    throw new Error(`applyOperation/insert: parent block "${blockId}" not found`)
+  }
+
+  const rebuild = (currentBlocks: Block[], depth: number): Block[] => {
+    const entry = chain[depth]
+    if (!entry) {
+      throw new Error(`insertBlockInTreeSpine: missing chain entry at depth ${depth}`)
+    }
+    const parent = assertChainConsistent(currentBlocks, entry, 'insertBlockInTreeSpine')
+
+    if (depth === chain.length - 1) {
+      // Leaf — this is the target parent block, splice into its slot.
+      // Auto-create the slot if absent: at the leaf, the slot named by `target.slot`
+      // is the destination chosen by the caller, not a slot the chain navigates through —
+      // so it may legitimately not exist yet on this parent.
+      const children = parent.slots?.[slotName] ?? []
+      const idx = index ?? children.length
+      checkInsertBounds(children, idx, `slot "${slot}"`)
+      const newChildren = children.slice()
+      newChildren.splice(idx, 0, block)
+      const next = currentBlocks.slice()
+      next[entry.index] = {
+        ...parent,
+        slots: { ...parent.slots, [slotName]: newChildren },
+      }
+      return next
+    }
+
+    // Inner depth: chain navigates through this parent's slots, so the slot MUST exist.
+    const childEntry = chain[depth + 1]
+    if (!childEntry) {
+      throw new Error('insertBlockInTreeSpine: missing child chain entry')
+    }
+    const { childSlotName, childArray } = resolveChildSlot(
+      parent,
+      childEntry,
+      'insertBlockInTreeSpine',
+    )
+    const newChildren = rebuild(childArray, depth + 1)
+    const next = currentBlocks.slice()
+    next[entry.index] = {
+      ...parent,
+      slots: { ...parent.slots, [childSlotName]: newChildren },
+    }
+    return next
+  }
+
+  return rebuild(blocks, 0)
 }
