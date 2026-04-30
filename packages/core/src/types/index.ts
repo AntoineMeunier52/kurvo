@@ -33,6 +33,14 @@ export { PAGE_SLOT_BLOCK_TYPE } from './page-slot'
 export type { TemplateDefinition } from './template'
 export type { Redirect, RedirectStatusCode } from './redirect'
 export type { LibraryDefinition } from './library'
-export type { TreeOperation, SlotKey, Target, Locator, LocatorInfo } from './operations'
+export type {
+  TreeOperation,
+  SlotKey,
+  Target,
+  Locator,
+  LocatorInfo,
+  AffectedBlocks,
+  ApplyResult,
+} from './operations'
 export { ROOT_SLOT_KEY, ROOT_SLOT_NAME } from './operations'
 export type { HistoryEntry } from './history'

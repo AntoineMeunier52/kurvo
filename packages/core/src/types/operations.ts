@@ -78,3 +78,35 @@ export interface LocatorInfo {
  * callers that pass a locator are responsible for keeping it in sync with the tree.
  */
 export type Locator = (id: BlockId) => LocatorInfo | null
+
+/**
+ * Categorized list of block ids touched by a single {@link TreeOperation}.
+ *
+ * Returned by `applyOperation` so callers (typically `BlockTree`) can perform
+ * incremental reindexing and targeted reactive notifications instead of
+ * rebuilding the whole index and triggering every subscriber.
+ *
+ * Categories are mutually exclusive **per op** for any given id:
+ * - `created`: id appeared in the tree (was absent, is now present)
+ * - `removed`: id disappeared from the tree (was present, is now absent)
+ * - `updated`: id stays in place but its `fields` or `slots` have a new identity
+ * - `moved`: id stays in the tree but its position (parent/slot/index) changed
+ */
+export interface AffectedBlocks {
+  created: BlockId[]
+  removed: BlockId[]
+  updated: BlockId[]
+  moved: BlockId[]
+}
+
+/**
+ * Full result of applying a {@link TreeOperation}.
+ *
+ * `inverse` seeds the history stack; `affected` enables incremental reindexing
+ * and targeted reactive notifications.
+ */
+export interface ApplyResult {
+  blocks: Block[]
+  inverse: TreeOperation
+  affected: AffectedBlocks
+}

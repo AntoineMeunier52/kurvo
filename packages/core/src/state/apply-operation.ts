@@ -1,12 +1,21 @@
-import type { Block, BlockId, Locator, SlotKey, Target } from '../types'
-import type { TreeOperation } from '../types'
+import type {
+  AffectedBlocks,
+  ApplyResult,
+  Block,
+  BlockId,
+  Locator,
+  SlotKey,
+  Target,
+  TreeOperation,
+} from '../types'
 import { ROOT_SLOT_KEY, ROOT_SLOT_NAME } from '../types'
 
 /**
  * Apply a {@link TreeOperation} to a tree of blocks immutably.
  *
  * Pure function: no mutation of the input, returns a fresh tree plus the inverse operation
- * (used to seed history entries).
+ * (used to seed history entries) and the set of {@link AffectedBlocks} (used by callers
+ * to perform incremental reindexing and targeted reactive notifications).
  *
  * If a {@link Locator} is provided, ops that locate a block by id use the **spine-rebuild**
  * path (O(depth)) instead of recursive tree walks (O(N)). Without a locator, behavior is
@@ -24,7 +33,7 @@ export const applyOperation = (
   blocks: Block[],
   op: TreeOperation,
   locator?: Locator,
-): { blocks: Block[]; inverse: TreeOperation } => {
+): ApplyResult => {
   switch (op.op) {
     case 'updateFields':
       return applyUpdateFields(blocks, op, locator)
@@ -41,13 +50,41 @@ export const applyOperation = (
   }
 }
 
+// ─── Affected helpers ─────────────────────────────────────────────────────
+
+const emptyAffected = (): AffectedBlocks => ({
+  created: [],
+  removed: [],
+  updated: [],
+  moved: [],
+})
+
+/**
+ * Collect every block id in a subtree (root included), in pre-order.
+ * Used to build `created`/`removed` lists for ops that touch entire subtrees
+ * (`insert`, `remove`, `replace !keepChildren`).
+ */
+const collectIds = (block: Block): BlockId[] => {
+  const ids: BlockId[] = []
+  const walk = (b: Block): void => {
+    ids.push(b.id)
+    if (b.slots) {
+      for (const children of Object.values(b.slots)) {
+        for (const child of children) walk(child)
+      }
+    }
+  }
+  walk(block)
+  return ids
+}
+
 // ─── Op handlers ──────────────────────────────────────────────────────────
 
 const applyUpdateFields = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'updateFields' }>,
   locator?: Locator,
-): { blocks: Block[]; inverse: TreeOperation } => {
+): ApplyResult => {
   const set = op.set ?? {}
   // `undefined` values in `set` would be lost across JSON serialization and break the
   // inverse symmetry. Reject explicitly: callers must use `unset` to remove keys.
@@ -104,6 +141,7 @@ const applyUpdateFields = (
   return {
     blocks: next,
     inverse: { op: 'updateFields', id: op.id, set: inverseSet, unset: inverseUnset },
+    affected: { ...emptyAffected(), updated: [op.id] },
   }
 }
 
@@ -111,7 +149,7 @@ const applyReorder = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'reorder' }>,
   locator?: Locator,
-): { blocks: Block[]; inverse: TreeOperation } => {
+): ApplyResult => {
   const { from, to, slot } = op
   const inverse: TreeOperation = { op: 'reorder', slot, from: to, to: from }
 
@@ -133,6 +171,18 @@ const applyReorder = (
     return next
   }
 
+  // Every id in [min(from,to), max(from,to)] sees its index change → all "moved".
+  const collectMoved = (arr: Block[]): BlockId[] => {
+    const lo = Math.min(from, to)
+    const hi = Math.max(from, to)
+    const moved: BlockId[] = []
+    for (let i = lo; i <= hi; i++) {
+      const b = arr[i]
+      if (b) moved.push(b.id)
+    }
+    return moved
+  }
+
   const { blockId, slotName } = resolveSlotKey(slot)
 
   // Root slot: splice the root array directly. No locator needed.
@@ -144,8 +194,13 @@ const applyReorder = (
     }
     checkBounds(blocks, from, 'from')
     checkBounds(blocks, to, 'to')
-    if (from === to) return { blocks, inverse }
-    return { blocks: reorderArray(blocks), inverse }
+    if (from === to) return { blocks, inverse, affected: emptyAffected() }
+    return {
+      blocks: reorderArray(blocks),
+      inverse,
+      // No parent at root → nothing to mark `updated`.
+      affected: { ...emptyAffected(), moved: collectMoved(blocks) },
+    }
   }
 
   // Nested slot: navigate to the parent block, transform its slot.
@@ -171,14 +226,28 @@ const applyReorder = (
     throw new Error(`applyOperation/reorder: block "${blockId}" not found`)
   }
 
-  return { blocks: next, inverse }
+  if (from === to) {
+    return { blocks: next, inverse, affected: emptyAffected() }
+  }
+
+  // `oldBlock.slots[slotName]` is the pre-reorder array — safe to read positions from it.
+  const oldChildren = oldBlock.slots?.[slotName] ?? []
+  return {
+    blocks: next,
+    inverse,
+    affected: {
+      ...emptyAffected(),
+      updated: [blockId],
+      moved: collectMoved(oldChildren),
+    },
+  }
 }
 
 const applyReplace = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'replace' }>,
   locator?: Locator,
-): { blocks: Block[]; inverse: TreeOperation } => {
+): ApplyResult => {
   if (op.block.id !== op.id) {
     throw new Error(
       `applyOperation/replace: op.block.id "${op.block.id}" must equal op.id "${op.id}"`,
@@ -216,26 +285,47 @@ const applyReplace = (
     keepChildren: false,
   }
 
-  return { blocks: next, inverse }
+  // The block itself is always `updated` (same id, new content).
+  // When children are dropped (!keepChildren), the old descendants are `removed`
+  // and the new descendants from `op.block` are `created`. The block's own id is
+  // excluded from both lists since it persists.
+  const affected: AffectedBlocks = { ...emptyAffected(), updated: [op.id] }
+  if (!op.keepChildren) {
+    affected.removed = collectIds(oldBlock).filter((id) => id !== op.id)
+    affected.created = collectIds(op.block).filter((id) => id !== op.id)
+  }
+
+  return { blocks: next, inverse, affected }
 }
 
 const applyInsert = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'insert' }>,
   locator?: Locator,
-): { blocks: Block[]; inverse: TreeOperation } => {
+): ApplyResult => {
   const next = locator
     ? insertBlockInTreeSpine(blocks, op.block, op.target, locator)
     : insertBlockInTree(blocks, op.block, op.target)
   const inverse: TreeOperation = { op: 'remove', id: op.block.id }
-  return { blocks: next, inverse }
+
+  // The inserted block + its subtree are `created`. The parent's slot reference
+  // changes, so the parent block is `updated` — except for root inserts, where
+  // there is no parent block to track.
+  const { blockId: parentId } = resolveSlotKey(op.target.slot)
+  const affected: AffectedBlocks = {
+    ...emptyAffected(),
+    created: collectIds(op.block),
+    updated: parentId === 'root' ? [] : [parentId],
+  }
+
+  return { blocks: next, inverse, affected }
 }
 
 const applyRemove = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'remove' }>,
   locator?: Locator,
-): { blocks: Block[]; inverse: TreeOperation } => {
+): ApplyResult => {
   const { blocks: next, removed } = locator
     ? removeBlockFromTreeSpine(blocks, op.id, locator)
     : removeBlockFromTree(blocks, op.id)
@@ -250,14 +340,23 @@ const applyRemove = (
     target: { slot: removed.parentSlot, index: removed.index },
   }
 
-  return { blocks: next, inverse }
+  // The removed block + its subtree are `removed`. The parent's slot reference
+  // changes, so the parent block is `updated` — except when removed from root.
+  const { blockId: parentId } = resolveSlotKey(removed.parentSlot)
+  const affected: AffectedBlocks = {
+    ...emptyAffected(),
+    removed: collectIds(removed.block),
+    updated: parentId === 'root' ? [] : [parentId],
+  }
+
+  return { blocks: next, inverse, affected }
 }
 
 const applyMove = (
   blocks: Block[],
   op: Extract<TreeOperation, { op: 'move' }>,
   locator?: Locator,
-): { blocks: Block[]; inverse: TreeOperation } => {
+): ApplyResult => {
   const removeResult = locator
     ? removeBlockFromTreeSpine(blocks, op.id, locator)
     : removeBlockFromTree(blocks, op.id)
@@ -291,7 +390,19 @@ const applyMove = (
     target: { slot: removed.parentSlot, index: removed.index },
   }
 
-  return { blocks: next, inverse }
+  // The moved block: `moved`. Both source and target parent see their slot
+  // reference change, so they're `updated` — but only count each non-root parent
+  // once (and skip if the move is intra-slot: same parent appears once).
+  const { blockId: oldParentId } = resolveSlotKey(removed.parentSlot)
+  const updated: BlockId[] = []
+  if (oldParentId !== 'root') updated.push(oldParentId)
+  if (targetBlockId !== 'root' && targetBlockId !== oldParentId) updated.push(targetBlockId)
+
+  return {
+    blocks: next,
+    inverse,
+    affected: { ...emptyAffected(), moved: [op.id], updated },
+  }
 }
 
 // ─── Walk-based helpers (fallback when no locator is provided) ───────────
