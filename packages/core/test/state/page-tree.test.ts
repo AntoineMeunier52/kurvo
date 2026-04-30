@@ -17,7 +17,7 @@ const blk = (
 
 describe('PageTree: multi-PageSlot orchestrator', () => {
   describe('construction', () => {
-    it('builds an empty document by default', () => {
+    it('builds an empty page by default', () => {
       const doc = new PageTree()
       expect(doc.slotNames()).toEqual([])
       expect(doc.has('anything')).toBe(false)
@@ -255,7 +255,7 @@ describe('PageTree: multi-PageSlot orchestrator', () => {
   })
 
   describe('serialize round-trip', () => {
-    it('snapshots the whole document keyed by slot', () => {
+    it('snapshots the whole page keyed by slot', () => {
       const d = new PageTree({
         header: [blk('h1', { v: 1 })],
         main: [blk('m1', {}, { cta: [blk('m1a')] })],

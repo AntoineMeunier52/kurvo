@@ -36,7 +36,7 @@ export class PageTree {
 
   // ─── Slot management ────────────────────────────────────────────────────
 
-  /** Names of every PageSlot this document is composed of. Stable ordering. */
+  /** Names of every PageSlot this page is composed of. Stable ordering. */
   slotNames(): string[] {
     return [...this._slots.keys()]
   }
@@ -83,7 +83,7 @@ export class PageTree {
    *
    * Caveat: per-id signals are NOT stable across cross-slot moves in V1
    * because each slot tree has its own `_signals` map. Since cross-slot
-   * moves are not supported at the Document API, this caveat does not
+   * moves are not supported at the PageTree API, this caveat does not
    * affect normal V1 usage.
    */
   signal(id: BlockId): ShallowRef<Block | null> {
@@ -95,12 +95,12 @@ export class PageTree {
     // slot, the ref will fire normally.
     const first = this._slots.values().next().value
     if (!first) {
-      throw new Error('PageTree.signal: document has no slots')
+      throw new Error('PageTree.signal: page has no slots')
     }
     return first.signal(id)
   }
 
-  /** Plain-JSON snapshot of the whole document, keyed by slot name. */
+  /** Plain-JSON snapshot of the whole page, keyed by slot name. */
   serialize(): Record<string, Block[]> {
     const out: Record<string, Block[]> = {}
     for (const [name, tree] of this._slots) {
