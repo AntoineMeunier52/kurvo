@@ -8,7 +8,8 @@ import type {
   Target,
   TreeOperation,
 } from '../types'
-import { ROOT_SLOT_KEY, ROOT_SLOT_NAME } from '../types'
+import { ROOT_BLOCK_ID, ROOT_SLOT_KEY, ROOT_SLOT_NAME } from '../types'
+import type { RootBlockId } from '../types'
 
 /**
  * Apply a {@link TreeOperation} to a tree of blocks immutably.
@@ -186,7 +187,7 @@ const applyReorder = (
   const { blockId, slotName } = resolveSlotKey(slot)
 
   // Root slot: splice the root array directly. No locator needed.
-  if (blockId === 'root') {
+  if (blockId === ROOT_BLOCK_ID) {
     if (slotName !== ROOT_SLOT_NAME) {
       throw new Error(
         `applyOperation/reorder: invalid root slot "${slotName}" (expected "${ROOT_SLOT_NAME}")`,
@@ -315,7 +316,7 @@ const applyInsert = (
   const affected: AffectedBlocks = {
     ...emptyAffected(),
     created: collectIds(op.block),
-    updated: parentId === 'root' ? [] : [parentId],
+    updated: parentId === ROOT_BLOCK_ID ? [] : [parentId],
   }
 
   return { blocks: next, inverse, affected }
@@ -346,7 +347,7 @@ const applyRemove = (
   const affected: AffectedBlocks = {
     ...emptyAffected(),
     removed: collectIds(removed.block),
-    updated: parentId === 'root' ? [] : [parentId],
+    updated: parentId === ROOT_BLOCK_ID ? [] : [parentId],
   }
 
   return { blocks: next, inverse, affected }
@@ -368,7 +369,7 @@ const applyMove = (
 
   // Cycle check: the target slot must not live inside the moved subtree.
   const { blockId: targetBlockId } = resolveSlotKey(op.target.slot)
-  if (targetBlockId !== 'root' && subtreeContainsId(removed.block, targetBlockId)) {
+  if (targetBlockId !== ROOT_BLOCK_ID && subtreeContainsId(removed.block, targetBlockId)) {
     throw new Error(
       `applyOperation/move: cannot move block "${op.id}" into its own descendant "${targetBlockId}"`,
     )
@@ -395,8 +396,10 @@ const applyMove = (
   // once (and skip if the move is intra-slot: same parent appears once).
   const { blockId: oldParentId } = resolveSlotKey(removed.parentSlot)
   const updated: BlockId[] = []
-  if (oldParentId !== 'root') updated.push(oldParentId)
-  if (targetBlockId !== 'root' && targetBlockId !== oldParentId) updated.push(targetBlockId)
+  if (oldParentId !== ROOT_BLOCK_ID) updated.push(oldParentId)
+  if (targetBlockId !== ROOT_BLOCK_ID && targetBlockId !== oldParentId) {
+    updated.push(targetBlockId)
+  }
 
   return {
     blocks: next,
@@ -447,7 +450,7 @@ const mapBlock = (
   return { blocks, oldBlock: null }
 }
 
-const resolveSlotKey = (slotKey: SlotKey): { blockId: BlockId | 'root'; slotName: string } => {
+const resolveSlotKey = (slotKey: SlotKey): { blockId: BlockId | RootBlockId; slotName: string } => {
   const idx = slotKey.indexOf(':')
   if (idx === -1) {
     throw new Error(`resolveSlotKey: invalid SlotKey "${slotKey}"`)
@@ -471,7 +474,7 @@ const insertBlockInTree = (blocks: Block[], block: Block, target: Target): Block
   const { slot, index } = target
   const { blockId, slotName } = resolveSlotKey(slot)
 
-  if (blockId === 'root') {
+  if (blockId === ROOT_BLOCK_ID) {
     if (slotName !== ROOT_SLOT_NAME) {
       throw new Error(
         `applyOperation/insert: invalid root slot "${slotName}" (expected "${ROOT_SLOT_NAME}")`,
@@ -770,7 +773,7 @@ const insertBlockInTreeSpine = (
   const { slot, index } = target
   const { blockId, slotName } = resolveSlotKey(slot)
 
-  if (blockId === 'root') {
+  if (blockId === ROOT_BLOCK_ID) {
     if (slotName !== ROOT_SLOT_NAME) {
       throw new Error(
         `applyOperation/insert: invalid root slot "${slotName}" (expected "${ROOT_SLOT_NAME}")`,

@@ -1,11 +1,11 @@
-import type { Block, BlockId } from './block'
+import type { BlockId } from './block'
 
 /**
  * @internal
  *
- * Indexed view of a Block within the tree, used as the value of the
- * `Map<BlockId, BlockNode>` maintained by `BlockTree`. Enables O(1) for:
- *   - Lookup of a block by id
+ * Positional entry of a Block within the tree, used as the value of the
+ * `Map<BlockId, BlockNode>` maintained by `BlockTree`. Enables O(1):
+ *   - Lookup of "is this id present"
  *   - Parent resolution (walk up via `parentId`)
  *   - Slot + index identification within the parent
  *   - Path-to-root computation
@@ -13,13 +13,17 @@ import type { Block, BlockId } from './block'
  * `null` on `parentId` and `slot` marks the block as living at the document root
  * (i.e. directly inside `Page.blocks`). For nested blocks both fields are non-null.
  *
- * The full `SlotKey` (`${parentId|'root'}:${slotName}`) is reconstructed on demand
- * rather than stored, so a single source of truth is kept.
+ * The full `SlotKey` (`${parentId|ROOT_BLOCK_ID}:${slotName}`) is reconstructed
+ * on demand rather than stored, so a single source of truth is kept.
+ *
+ * Intentionally **does not** carry a `block: Block` reference: `BlockTree` walks
+ * the live `_blocks` array via the parent chain to resolve a block on demand.
+ * That keeps reads always consistent with the canonical tree, even when a
+ * mutation rebuilds the spine and produces a new ref for several ancestors.
  *
  * Not exposed in the public surface: user code only manipulates `Block` (JSON form).
  */
 export interface BlockNode {
-  block: Block
   /** `null` if the block is at the document root. */
   parentId: BlockId | null
   /** Slot name on the parent (without the `parentId:` prefix). `null` if at the root. */

@@ -41,6 +41,7 @@ export type {
   LocatorInfo,
   AffectedBlocks,
   ApplyResult,
+  RootBlockId,
 } from './operations'
-export { ROOT_SLOT_KEY, ROOT_SLOT_NAME } from './operations'
+export { ROOT_SLOT_KEY, ROOT_SLOT_NAME, ROOT_BLOCK_ID } from './operations'
 export type { HistoryEntry } from './history'

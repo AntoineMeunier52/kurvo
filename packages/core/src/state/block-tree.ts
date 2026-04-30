@@ -7,19 +7,25 @@ import type {
   Target,
   TreeOperation,
 } from '../types'
-import { ROOT_SLOT_KEY } from '../types'
+import { ROOT_BLOCK_ID, ROOT_SLOT_KEY } from '../types'
 import type { BlockNode } from '../types/block-node'
 import { applyOperation } from './apply-operation'
 import { shallowRef, type Reactive } from './reactive'
 
 /**
  * Reactive wrapper around an immutable block tree, with a manually-maintained
- * `Map<BlockId, BlockNode>` index (parent pointers) for O(1) lookups.
+ * `Map<BlockId, BlockNode>` index (parent pointers + position) for O(1) lookups
+ * of "is this id present" and O(depth) reads of the live block via chain walk.
  *
  * Pure orchestrator: delegates to {@link applyOperation} for the algebra,
  * incrementally patches the index using the {@link AffectedBlocks} returned
  * by `applyOperation`, and validates id uniqueness on insert/replace (which
  * `applyOperation` does not enforce).
+ *
+ * Reads (`get` / `getParent`) walk `_blocks` from root through the recorded
+ * parent chain — no per-node `Block` cache is kept. This guarantees reads are
+ * always coherent with the canonical tree, even when a mutation rebuilds the
+ * spine and produces fresh refs for several ancestors.
  *
  * History is intentionally NOT owned by this class — see Phase M4 for the
  * `History` companion. Each mutation method returns the inverse op so the
@@ -46,8 +52,7 @@ export class BlockTree {
   }
 
   get(id: BlockId): Block | null {
-    void this._blocks.value
-    return this._nodes.get(id)?.block ?? null
+    return this.findInTree(id, this._blocks.value)
   }
 
   has(id: BlockId): boolean {
@@ -56,10 +61,9 @@ export class BlockTree {
   }
 
   getParent(id: BlockId): Block | null {
-    void this._blocks.value
     const node = this._nodes.get(id)
     if (!node || node.parentId === null) return null
-    return this._nodes.get(node.parentId)?.block ?? null
+    return this.findInTree(node.parentId, this._blocks.value)
   }
 
   getPath(id: BlockId): SlotKey[] {
@@ -128,7 +132,7 @@ export class BlockTree {
     if (op.op === 'insert') {
       this.assertNoCollision(op.block)
     } else if (op.op === 'replace' && !op.keepChildren) {
-      const oldBlock = this._nodes.get(op.id)?.block
+      const oldBlock = this.findInTree(op.id, this._blocks.value)
       const exclude = oldBlock ? collectIds(oldBlock) : undefined
       this.assertNoCollision(op.block, exclude)
     }
@@ -175,28 +179,24 @@ export class BlockTree {
    *     induced by insert/remove/move/reorder. Pre-existing entries inside the
    *     dirty subtree are simply re-set to identical values — wasteful but
    *     correct, and bounded by the dirty subtree size, not the whole tree.
-   *  3. Update the `block` reference on entries in `affected.updated` whose
-   *     position is unchanged but whose content (fields or slots map) differs.
+   *
+   * `affected.updated` is intentionally **not** consumed here: the index stores
+   * positions only, not block refs, so a content-only change has no effect on
+   * `_nodes`. (Étape 5 will surface `updated` to drive per-node reactive
+   * notifications.)
    */
   private applyAffectedToIndex(
     op: TreeOperation,
     inverse: TreeOperation,
     next: Block[],
-    affected: AffectedBlocks,
+    _affected: AffectedBlocks,
   ): void {
-    for (const id of affected.removed) {
+    for (const id of _affected.removed) {
       this._nodes.delete(id)
     }
 
     for (const slotKey of computeDirtySlots(op, inverse)) {
       this.reindexSlot(slotKey, next)
-    }
-
-    for (const id of affected.updated) {
-      const node = this._nodes.get(id)
-      if (!node) continue
-      const newBlock = this.findInNext(id, next)
-      if (newBlock !== null) node.block = newBlock
     }
   }
 
@@ -206,24 +206,23 @@ export class BlockTree {
    * after an op that changed the slot's child array.
    */
   private reindexSlot(slotKey: SlotKey, next: Block[]): void {
-    const colon = slotKey.indexOf(':')
-    if (colon === -1) return
-    const parentIdRaw = slotKey.substring(0, colon)
-    const slotName = slotKey.substring(colon + 1)
+    const parsed = parseSlotKey(slotKey)
+    if (parsed === null) return
+    const { blockId: parentId, slotName } = parsed
 
     let slotChildren: Block[]
     let nodeParentId: BlockId | null
     let nodeSlot: string | null
 
-    if (parentIdRaw === 'root') {
+    if (parentId === ROOT_BLOCK_ID) {
       slotChildren = next
       nodeParentId = null
       nodeSlot = null
     } else {
-      const parentBlock = this.findInNext(parentIdRaw, next)
+      const parentBlock = this.findInTree(parentId, next)
       if (parentBlock === null) return
       slotChildren = parentBlock.slots?.[slotName] ?? []
-      nodeParentId = parentIdRaw
+      nodeParentId = parentId
       nodeSlot = slotName
     }
 
@@ -231,7 +230,6 @@ export class BlockTree {
       const child = slotChildren[i]
       if (!child) continue
       this._nodes.set(child.id, {
-        block: child,
         parentId: nodeParentId,
         slot: nodeSlot,
         index: i,
@@ -245,16 +243,13 @@ export class BlockTree {
   }
 
   /**
-   * Locate the block carrying `id` inside `next` by descending from the root
-   * along the parent chain stored in `_nodes`. Used by the patch routine to
-   * resolve the new content of an `updated` block (whose position is stable)
-   * or to reach a dirty slot's parent (whose own position is also stable).
-   *
-   * Returns `null` if any node along the chain is missing or if the chain
-   * does not match `next` (which would indicate index drift — should not
-   * happen if `applyOperation`'s contract is honored).
+   * Resolve `id` to its current Block by descending from the root of `tree`
+   * through the parent chain stored in `_nodes`. Returns `null` if any node
+   * along the chain is missing or if the chain does not match `tree` (which
+   * indicates index drift — should not happen if `applyOperation`'s contract
+   * is honored).
    */
-  private findInNext(id: BlockId, next: Block[]): Block | null {
+  private findInTree(id: BlockId, tree: Block[]): Block | null {
     if (!this._nodes.has(id)) return null
 
     const chain: { slot: string | null; index: number }[] = []
@@ -267,7 +262,7 @@ export class BlockTree {
     }
     chain.reverse()
 
-    let currentArray: Block[] = next
+    let currentArray: Block[] = tree
     let result: Block | null = null
     for (let i = 0; i < chain.length; i++) {
       const entry = chain[i]
@@ -302,7 +297,7 @@ export class BlockTree {
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i]
       if (!block) continue
-      this._nodes.set(block.id, { block, parentId, slot, index: i })
+      this._nodes.set(block.id, { parentId, slot, index: i })
       if (block.slots) {
         for (const [slotName, children] of Object.entries(block.slots)) {
           this.indexBlocks(children, block.id, slotName)
@@ -339,6 +334,20 @@ const collectIds = (block: Block): Set<BlockId> => {
   }
   walk(block)
   return ids
+}
+
+/**
+ * Split a `SlotKey` into `{ blockId, slotName }`. `blockId` is either a
+ * concrete `BlockId` or `ROOT_BLOCK_ID` (the pseudo-block representing the
+ * document root). Returns `null` for malformed keys (defensive — should not
+ * happen with values produced by the type system).
+ */
+const parseSlotKey = (
+  slotKey: SlotKey,
+): { blockId: BlockId | typeof ROOT_BLOCK_ID; slotName: string } | null => {
+  const colon = slotKey.indexOf(':')
+  if (colon === -1) return null
+  return { blockId: slotKey.substring(0, colon), slotName: slotKey.substring(colon + 1) }
 }
 
 /**

@@ -1,23 +1,37 @@
 import type { Block, BlockId } from './block'
 
 /**
+ * Reserved id of the pseudo-block representing the Page root in {@link SlotKey}.
+ *
+ * Centralized as a constant so the literal `'root'` doesn't get sprinkled across
+ * the codebase. Real {@link BlockId}s should never collide with this value
+ * (callers — typically `defineBlock` and the editor — must not generate `'root'`).
+ *
+ * Used as a string (not a JS `Symbol`) because {@link SlotKey} is itself a
+ * string for JSON-safe serialization across `postMessage` / persistence layers.
+ */
+export const ROOT_BLOCK_ID = 'root' as const
+export type RootBlockId = typeof ROOT_BLOCK_ID
+
+/**
  * Unique identifier for a slot inside a Page.
  *
- * Format: `${BlockId | 'root'}:${slotName}`.
- * The pseudo-block `'root'` represents the Page root (the `Page.blocks` array).
- * Convention: `'root'` exposes a single slot, named by {@link ROOT_SLOT_NAME}.
+ * Format: `${BlockId | RootBlockId}:${slotName}`.
+ * The pseudo-block {@link ROOT_BLOCK_ID} represents the Page root (the
+ * `Page.blocks` array). Convention: the root exposes a single slot, named
+ * by {@link ROOT_SLOT_NAME}.
  *
  * Examples:
  *   - `'root:default'`     — Page root
  *   - `'blk_8f3k:cta'`     — slot `cta` of Block `blk_8f3k`
  */
-export type SlotKey = `${BlockId | 'root'}:${string}`
+export type SlotKey = `${BlockId | RootBlockId}:${string}`
 
-/** Conventional name of the root slot, exposed only by the pseudo-block `'root'`. */
+/** Conventional name of the root slot, exposed only by {@link ROOT_BLOCK_ID}. */
 export const ROOT_SLOT_NAME = 'default'
 
 /** Root SlotKey of the Page. */
-export const ROOT_SLOT_KEY: SlotKey = `root:${ROOT_SLOT_NAME}`
+export const ROOT_SLOT_KEY: SlotKey = `${ROOT_BLOCK_ID}:${ROOT_SLOT_NAME}`
 
 /**
  * Insertion target: `{ slot, index }`.

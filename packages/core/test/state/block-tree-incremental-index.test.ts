@@ -217,4 +217,37 @@ describe('BlockTree: incremental index after each op', () => {
       triggerLocatorPath(tree, 'c')
     })
   })
+
+  describe('reads stay in sync with the canonical tree', () => {
+    // Regression: the previous implementation cached `block` refs in BlockNode
+    // and only refreshed them for ids in `affected.updated` — which excluded
+    // ancestors above the immediate parent. Reading a parent's slots after
+    // a spine-rebuild op (replace, updateFields, reorder, …) returned stale
+    // children. Now that reads walk the live tree, every read is fresh.
+
+    it('replace: reading the parent gives the new replaced child', () => {
+      const tree = new BlockTree([blk('p', {}, { cta: [blk('a', { v: 'old' })] })])
+      tree.replace('a', blk('a', { v: 'new' }))
+      const parent = tree.get('p')
+      expect(parent?.slots?.cta?.[0]?.fields).toEqual({ v: 'new' })
+    })
+
+    it('updateFields on a deeply nested leaf: every ancestor read is fresh', () => {
+      const tree = new BlockTree([
+        blk('gp', {}, { x: [blk('p', {}, { y: [blk('child', { v: 'old' })] })] }),
+      ])
+      tree.updateFields('child', { set: { v: 'new' } })
+      // Reading any ancestor's slot must surface the new leaf, not a stale ref.
+      expect(tree.get('p')?.slots?.y?.[0]?.fields).toEqual({ v: 'new' })
+      expect(tree.get('gp')?.slots?.x?.[0]?.slots?.y?.[0]?.fields).toEqual({
+        v: 'new',
+      })
+    })
+
+    it('reorder: reading the parent surfaces the new order', () => {
+      const tree = new BlockTree([blk('p', {}, { cta: [blk('a'), blk('b'), blk('c')] })])
+      tree.reorder('p:cta' as SlotKey, 0, 2)
+      expect(tree.get('p')?.slots?.cta?.map((b) => b.id)).toEqual(['b', 'c', 'a'])
+    })
+  })
 })
