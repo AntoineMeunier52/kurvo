@@ -375,15 +375,14 @@ const applyMove = (
     )
   }
 
-  // The locator was built from the OLD tree. After remove, the position of every
-  // block OUTSIDE the removed subtree is unchanged (parentId/slot/index are stable
-  // because we only spliced one element from the source's parent slot, and the
-  // source's parent isn't a descendant of the source). The cycle check above
-  // guarantees target.blockId is outside the removed subtree, so the locator
-  // remains valid for it.
-  const next = locator
-    ? insertBlockInTreeSpine(afterRemove, removed.block, op.target, locator)
-    : insertBlockInTree(afterRemove, removed.block, op.target)
+  // The locator was built from the OLD tree. After remove, the indices of
+  // source's later siblings (and everything reachable through them) have
+  // shifted by 1 in `afterRemove` — the locator still points to OLD positions,
+  // so the spine descent for the insert can land on the wrong block. Always
+  // use the walk-based insert here for safety. Move is a rare op (drag-drop),
+  // so the O(N) cost on this single phase is fine; the remove half still
+  // benefits from the spine path.
+  const next = insertBlockInTree(afterRemove, removed.block, op.target)
 
   const inverse: TreeOperation = {
     op: 'move',

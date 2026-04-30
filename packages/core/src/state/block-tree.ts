@@ -42,7 +42,14 @@ export class BlockTree {
 
   // ─── Read ────────────────────────────────────────────────────────────────
 
-  get blocks(): Reactive<Block[]> {
+  /**
+   * Live, reactive view of the canonical tree. Typed `readonly` so callers
+   * cannot mutate it in place (`push`, `splice`, …) — those would bypass the
+   * reactive `shallowRef` trigger and the index patch routine, leaving the
+   * tree and the index out of sync. Mutate via {@link applyOp} (or the
+   * dedicated `insert` / `move` / etc. methods).
+   */
+  get blocks(): Reactive<readonly Block[]> {
     return this._blocks.value
   }
 
@@ -66,6 +73,15 @@ export class BlockTree {
     return this.findInTree(node.parentId, this._blocks.value)
   }
 
+  /**
+   * Slot path from the document root down to `id`, e.g.
+   * `['root:default', 'p:cta', 'a:inner']` for a block nested two levels deep.
+   *
+   * Returns `[]` for unknown ids — `[]` is reserved for "id not in the tree",
+   * because a real path always includes at least `[ROOT_SLOT_KEY]`. Use
+   * {@link has} to disambiguate if needed; in practice, the empty path falls
+   * through naturally in iteration-style code.
+   */
   getPath(id: BlockId): SlotKey[] {
     void this._blocks.value
     if (!this._nodes.has(id)) return []
@@ -182,8 +198,7 @@ export class BlockTree {
    *
    * `affected.updated` is intentionally **not** consumed here: the index stores
    * positions only, not block refs, so a content-only change has no effect on
-   * `_nodes`. (Étape 5 will surface `updated` to drive per-node reactive
-   * notifications.)
+   * `_nodes`.
    */
   private applyAffectedToIndex(
     op: TreeOperation,
@@ -244,18 +259,28 @@ export class BlockTree {
 
   /**
    * Resolve `id` to its current Block by descending from the root of `tree`
-   * through the parent chain stored in `_nodes`. Returns `null` if any node
-   * along the chain is missing or if the chain does not match `tree` (which
-   * indicates index drift — should not happen if `applyOperation`'s contract
-   * is honored).
+   * through the parent chain stored in `_nodes`.
+   *
+   * Returns `null` if `id` is not in the index — this is the legitimate
+   * "not present" case. Throws if `id` IS in the index but the chain does
+   * not match `tree`: that means the index has drifted from the canonical
+   * tree, which is a programmer error in `BlockTree`'s patch routine and
+   * cannot be silently masked (a stale read here would propagate through
+   * `tree.get` / `tree.getParent` and produce subtle bugs downstream).
    */
   private findInTree(id: BlockId, tree: Block[]): Block | null {
     if (!this._nodes.has(id)) return null
+
+    const drift = (reason: string): never => {
+      throw new Error(`BlockTree.findInTree: index drift on "${id}" (${reason})`)
+    }
 
     const chain: { slot: string | null; index: number }[] = []
     let currentId: BlockId | null = id
     while (currentId !== null) {
       const n = this._nodes.get(currentId)
+      if (!n) drift(`missing chain entry "${currentId}"`)
+      // After `drift` throws, TS still wants the narrowing — guard explicitly.
       if (!n) return null
       chain.push({ slot: n.slot, index: n.index })
       currentId = n.parentId
@@ -266,14 +291,18 @@ export class BlockTree {
     let result: Block | null = null
     for (let i = 0; i < chain.length; i++) {
       const entry = chain[i]
+      if (!entry) drift(`empty chain at depth ${i}`)
       if (!entry) return null
       const block = currentArray[entry.index]
+      if (!block) drift(`no block at index ${entry.index} (depth ${i})`)
       if (!block) return null
       result = block
       const childEntry = chain[i + 1]
       if (childEntry === undefined) break
+      if (childEntry.slot === null) drift(`null slot at depth ${i + 1}`)
       if (childEntry.slot === null) return null
       const innerSlot = block.slots?.[childEntry.slot]
+      if (innerSlot === undefined) drift(`missing slot "${childEntry.slot}" on "${block.id}"`)
       if (innerSlot === undefined) return null
       currentArray = innerSlot
     }

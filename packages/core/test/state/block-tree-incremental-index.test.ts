@@ -175,6 +175,19 @@ describe('BlockTree: incremental index after each op', () => {
       expect(tree.has('alsoGone')).toBe(false)
       expect(tree.has('willStay')).toBe(true)
     })
+
+    it('!keepChildren with completely renamed slots: new descendants get correct path', () => {
+      // Old block has `items`, new block has `sections`. The patch routine
+      // must (a) drop ids from the old slot via `affected.removed` and
+      // (b) reindex only the new slot — getPath of new descendants must
+      // reflect the new slot name, not the old one.
+      const tree = new BlockTree([blk('X', {}, { items: [blk('a'), blk('b')] })])
+      tree.replace('X', blk('X', {}, { sections: [blk('c')] }))
+      expect(tree.has('a')).toBe(false)
+      expect(tree.has('b')).toBe(false)
+      expect(tree.has('c')).toBe(true)
+      expect(tree.getPath('c')).toEqual([ROOT_SLOT_KEY, 'X:sections' as SlotKey])
+    })
   })
 
   describe('updateFields', () => {
