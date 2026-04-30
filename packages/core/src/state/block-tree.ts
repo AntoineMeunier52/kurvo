@@ -10,7 +10,7 @@ import type {
 import { ROOT_BLOCK_ID, ROOT_SLOT_KEY } from '../types'
 import type { BlockNode } from '../types/block-node'
 import { applyOperation } from './apply-operation'
-import { shallowRef, triggerRef, untracked, type Reactive, type ShallowRef } from './reactive'
+import { customRef, shallowRef, untracked, type Reactive, type Ref } from './reactive'
 
 /**
  * Reactive wrapper around an immutable block tree, with a manually-maintained
@@ -35,13 +35,16 @@ export class BlockTree {
   private _blocks = shallowRef<Block[]>([])
   private _nodes: Map<BlockId, BlockNode> = new Map()
   /**
-   * Per-id reactive signals, lazily created by {@link signal}. Stored as
-   * `ShallowRef<Block | null>` because Block is a tree of plain objects we
-   * want to compare by reference, not deep-track field-by-field. The shallow
-   * trigger fires whenever we replace `.value` with a new ref produced by
-   * `applyOperation`'s spine rebuild.
+   * Per-id reactive signals, lazily created by {@link signal}. The value of
+   * each signal is computed on read (via {@link findInTree}) so it is always
+   * coherent with `_blocks.value` — even for ancestors of a leaf that was
+   * just updated (whose Block ref changed via spine rebuild but whose own
+   * signal would otherwise stay stale). Triggers are fired explicitly by
+   * {@link notifyAffected}; we don't rely on value-equality comparison.
    */
-  private _signals: Map<BlockId, ShallowRef<Block | null>> = new Map()
+  private _signals: Map<BlockId, Ref<Block | null>> = new Map()
+  /** Trigger callbacks paired with the customRefs above, keyed by the same id. */
+  private _signalTriggers: Map<BlockId, () => void> = new Map()
 
   constructor(initial: Block[] = []) {
     this._blocks.value = structuredClone(initial)
@@ -99,15 +102,35 @@ export class BlockTree {
    * fields fires only the signals of blocks listed in `affected`, leaving
    * the other 999-of-1000 components in a large page untouched.
    */
-  signal(id: BlockId): ShallowRef<Block | null> {
+  signal(id: BlockId): Ref<Block | null> {
     let ref = this._signals.get(id)
     if (!ref) {
-      // Reading `_blocks.value` here would otherwise track the calling effect
-      // against the global blocks ref — defeating the per-id granularity (every
-      // op flips `_blocks.value` and would re-trigger every signal subscriber).
-      // Wrap the lookup in `untracked` so signal creation registers no deps.
-      const initial = untracked(() => this.findInTree(id, this._blocks.value))
-      ref = shallowRef<Block | null>(initial)
+      // `customRef` decouples value freshness from trigger semantics:
+      //  - `.get()` walks the live tree on every read → ancestors of a
+      //    just-updated descendant (whose Block ref changed via spine
+      //    rebuild) surface the new content, never a stale cached ref.
+      //  - `.track()` registers the calling effect against this signal only,
+      //    so consumers don't accidentally re-render on unrelated mutations.
+      //  - `notifyAffected` calls the captured `trigger` exactly for ids in
+      //    `affected.{created, updated, moved, removed}` — that's where
+      //    fine-grained re-rendering is decided.
+      // The inner `findInTree` is wrapped in `untracked` so reading
+      // `_blocks.value` does NOT register a dep on the global ref (otherwise
+      // every op would re-trigger every signal subscriber).
+      ref = customRef<Block | null>((track, trigger) => {
+        this._signalTriggers.set(id, trigger)
+        return {
+          get: () => {
+            track()
+            return untracked(() => this.findInTree(id, this._blocks.value))
+          },
+          set: () => {
+            throw new Error(
+              `BlockTree.signal: refs returned by signal() are read-only (id="${id}")`,
+            )
+          },
+        }
+      })
       this._signals.set(id, ref)
     }
     return ref
@@ -210,6 +233,13 @@ export class BlockTree {
     // Pass a locator built from the live index so applyOperation uses the
     // O(depth) spine-rebuild path instead of a recursive O(N) walk.
     const { blocks: next, inverse, affected } = applyOperation(this._blocks.value, op, this.locator)
+    // True no-op fast path: `applyOperation` returned the same blocks array
+    // (e.g. `reorder` with `from === to`). Skip the index patch, the global
+    // trigger, and per-id signal triggers. The inverse op is still returned
+    // for history symmetry — callers may choose to drop it.
+    if (next === this._blocks.value) {
+      return inverse
+    }
     // Patch the index BEFORE flipping the reactive ref so that any effect
     // re-running synchronously on the trigger sees a coherent (tree, index) pair.
     this.applyAffectedToIndex(op, inverse, next, affected)
@@ -266,35 +296,23 @@ export class BlockTree {
    * so any effect that reads both the global blocks list and the per-id ref
    * sees consistent state.
    */
-  private notifyAffected(affected: AffectedBlocks, next: Block[]): void {
-    // `created` / `updated` produce a fresh Block reference for the watched
-    // id (spine rebuild + new fields/slots), so a plain assignment is enough
-    // to fire `ShallowRef`'s strict-equality trigger.
-    for (const id of [...affected.created, ...affected.updated]) {
-      const ref = this._signals.get(id)
-      if (!ref) continue
-      ref.value = this.findInTree(id, next)
+  private notifyAffected(affected: AffectedBlocks, _next: Block[]): void {
+    // Fire each touched id's trigger exactly once. The customRef's `.get()`
+    // walks the live tree on read, so we don't have to swap a cached value —
+    // we only have to invalidate the dep so consumer effects re-run.
+    // Set-dedup so an id appearing in two categories (defensive — current
+    // ops keep them mutually exclusive) doesn't trigger twice.
+    const fired = new Set<BlockId>()
+    const fire = (id: BlockId): void => {
+      if (fired.has(id)) return
+      fired.add(id)
+      const trigger = this._signalTriggers.get(id)
+      if (trigger) trigger()
     }
-
-    // `moved` preserves the Block's identity (the spine just splices the same
-    // ref into a new slot) — `ref.value = sameRef` would be a no-op for the
-    // `ShallowRef` trigger. Force a fire via `triggerRef` so subscribers that
-    // rely on position (e.g. re-reading `getParent` / `getPath`) still update.
-    for (const id of affected.moved) {
-      const ref = this._signals.get(id)
-      if (!ref) continue
-      ref.value = this.findInTree(id, next)
-      triggerRef(ref)
-    }
-
-    // `removed` flips the value to null. The ref stays in `_signals` so any
-    // component still holding it observes a stable `null`. If the same id
-    // were ever re-introduced (rare — ids are nanoid-unique in practice),
-    // the existing ref would simply be reused with the new block as its value.
-    for (const id of affected.removed) {
-      const ref = this._signals.get(id)
-      if (ref) ref.value = null
-    }
+    for (const id of affected.created) fire(id)
+    for (const id of affected.updated) fire(id)
+    for (const id of affected.moved) fire(id)
+    for (const id of affected.removed) fire(id)
   }
 
   private applyAffectedToIndex(

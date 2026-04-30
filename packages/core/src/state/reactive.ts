@@ -13,6 +13,7 @@
 
 import {
   computed as vueComputed,
+  customRef as vueCustomRef,
   effect as vueEffect,
   isProxy as vueIsProxy,
   isReactive as vueIsReactive,
@@ -60,6 +61,7 @@ export const watch = vueWatch
 export const shallowRef = vueShallowRef
 export const shallowReactive = vueShallowReactive
 export const triggerRef = vueTriggerRef
+export const customRef = vueCustomRef
 
 export const isRef = vueIsRef
 export const isReactive = vueIsReactive

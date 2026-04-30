@@ -426,8 +426,16 @@ const mapBlock = (
     if (!block) continue
 
     if (block.id === id) {
+      // No-op short-circuit: if the updater returns the same Block reference,
+      // the leaf didn't actually change — propagate the original `blocks`
+      // array so callers can detect the no-op via `next === blocks` and
+      // skip work / signal triggers / shallowRef bumps.
+      const updated = updater(block)
+      if (updated === block) {
+        return { blocks, oldBlock: block }
+      }
       const next = blocks.slice()
-      next[i] = updater(block)
+      next[i] = updated
       return { blocks: next, oldBlock: block }
     }
 
@@ -435,6 +443,12 @@ const mapBlock = (
       for (const [slotName, children] of Object.entries(block.slots)) {
         const result = mapBlock(children, id, updater)
         if (result.oldBlock !== null) {
+          // If the recursive call short-circuited (its blocks ref unchanged),
+          // propagate the no-op all the way up — every ancestor stays at its
+          // original ref.
+          if (result.blocks === children) {
+            return { blocks, oldBlock: result.oldBlock }
+          }
           const next = blocks.slice()
           next[i] = {
             ...block,
@@ -675,9 +689,16 @@ const mapBlockSpine = (
     const block = assertChainConsistent(currentBlocks, entry, 'mapBlockSpine')
 
     if (depth === chain.length - 1) {
-      // Leaf — apply updater.
+      // Leaf — apply updater. No-op short-circuit: when the updater returns
+      // the same Block ref, propagate the original `currentBlocks` so callers
+      // can detect the no-op via referential equality and skip downstream
+      // work (signal triggers, _blocks.value bump, ...).
+      const updated = updater(block)
+      if (updated === block) {
+        return { blocks: currentBlocks, oldBlock: block }
+      }
       const next = currentBlocks.slice()
-      next[entry.index] = updater(block)
+      next[entry.index] = updated
       return { blocks: next, oldBlock: block }
     }
 
@@ -688,6 +709,11 @@ const mapBlockSpine = (
     }
     const { childSlotName, childArray } = resolveChildSlot(block, childEntry, 'mapBlockSpine')
     const result = rebuild(childArray, depth + 1)
+    // Recursive no-op short-circuit: if the inner rebuild returned the same
+    // children array, no spine rebuild is needed at this level either.
+    if (result.blocks === childArray) {
+      return { blocks: currentBlocks, oldBlock: result.oldBlock }
+    }
     const next = currentBlocks.slice()
     next[entry.index] = {
       ...block,
