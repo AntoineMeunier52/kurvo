@@ -1,4 +1,12 @@
-import type { Block, BlockId, Locator, SlotKey, Target, TreeOperation } from '../types'
+import type {
+  AffectedBlocks,
+  Block,
+  BlockId,
+  Locator,
+  SlotKey,
+  Target,
+  TreeOperation,
+} from '../types'
 import { ROOT_SLOT_KEY } from '../types'
 import type { BlockNode } from '../types/block-node'
 import { applyOperation } from './apply-operation'
@@ -9,8 +17,9 @@ import { shallowRef, type Reactive } from './reactive'
  * `Map<BlockId, BlockNode>` index (parent pointers) for O(1) lookups.
  *
  * Pure orchestrator: delegates to {@link applyOperation} for the algebra,
- * rebuilds the index after each mutation, and validates id uniqueness on
- * insert/replace (which `applyOperation` does not enforce).
+ * incrementally patches the index using the {@link AffectedBlocks} returned
+ * by `applyOperation`, and validates id uniqueness on insert/replace (which
+ * `applyOperation` does not enforce).
  *
  * History is intentionally NOT owned by this class — see Phase M4 for the
  * `History` companion. Each mutation method returns the inverse op so the
@@ -126,10 +135,10 @@ export class BlockTree {
 
     // Pass a locator built from the live index so applyOperation uses the
     // O(depth) spine-rebuild path instead of a recursive O(N) walk.
-    const { blocks: next, inverse } = applyOperation(this._blocks.value, op, this.locator)
-    // Rebuild the index BEFORE flipping the reactive ref so that any effect
+    const { blocks: next, inverse, affected } = applyOperation(this._blocks.value, op, this.locator)
+    // Patch the index BEFORE flipping the reactive ref so that any effect
     // re-running synchronously on the trigger sees a coherent (tree, index) pair.
-    this.rebuildIndex(next)
+    this.applyAffectedToIndex(op, inverse, next, affected)
     this._blocks.value = next
     return inverse
   }
@@ -153,6 +162,128 @@ export class BlockTree {
   }
 
   // ─── private ─────────────────────────────────────────────────────────────
+
+  /**
+   * Incrementally patch the index in response to a single op, using the
+   * `affected` set computed by {@link applyOperation}.
+   *
+   * Strategy:
+   *  1. Drop entries for any id in `affected.removed` (subtree no longer in tree).
+   *  2. Re-walk dirty slots (slots whose child array reference changed in `next`).
+   *     This single pass handles `created` (newly indexed entries), `moved`
+   *     (parent/slot/index updated for the moved id) and sibling index shifts
+   *     induced by insert/remove/move/reorder. Pre-existing entries inside the
+   *     dirty subtree are simply re-set to identical values — wasteful but
+   *     correct, and bounded by the dirty subtree size, not the whole tree.
+   *  3. Update the `block` reference on entries in `affected.updated` whose
+   *     position is unchanged but whose content (fields or slots map) differs.
+   */
+  private applyAffectedToIndex(
+    op: TreeOperation,
+    inverse: TreeOperation,
+    next: Block[],
+    affected: AffectedBlocks,
+  ): void {
+    for (const id of affected.removed) {
+      this._nodes.delete(id)
+    }
+
+    for (const slotKey of computeDirtySlots(op, inverse)) {
+      this.reindexSlot(slotKey, next)
+    }
+
+    for (const id of affected.updated) {
+      const node = this._nodes.get(id)
+      if (!node) continue
+      const newBlock = this.findInNext(id, next)
+      if (newBlock !== null) node.block = newBlock
+    }
+  }
+
+  /**
+   * Re-walk a single slot in `next` and update entries for every block found
+   * inside it (including descendants). Used by {@link applyAffectedToIndex}
+   * after an op that changed the slot's child array.
+   */
+  private reindexSlot(slotKey: SlotKey, next: Block[]): void {
+    const colon = slotKey.indexOf(':')
+    if (colon === -1) return
+    const parentIdRaw = slotKey.substring(0, colon)
+    const slotName = slotKey.substring(colon + 1)
+
+    let slotChildren: Block[]
+    let nodeParentId: BlockId | null
+    let nodeSlot: string | null
+
+    if (parentIdRaw === 'root') {
+      slotChildren = next
+      nodeParentId = null
+      nodeSlot = null
+    } else {
+      const parentBlock = this.findInNext(parentIdRaw, next)
+      if (parentBlock === null) return
+      slotChildren = parentBlock.slots?.[slotName] ?? []
+      nodeParentId = parentIdRaw
+      nodeSlot = slotName
+    }
+
+    for (let i = 0; i < slotChildren.length; i++) {
+      const child = slotChildren[i]
+      if (!child) continue
+      this._nodes.set(child.id, {
+        block: child,
+        parentId: nodeParentId,
+        slot: nodeSlot,
+        index: i,
+      })
+      if (child.slots) {
+        for (const [innerSlotName, innerChildren] of Object.entries(child.slots)) {
+          this.indexBlocks(innerChildren, child.id, innerSlotName)
+        }
+      }
+    }
+  }
+
+  /**
+   * Locate the block carrying `id` inside `next` by descending from the root
+   * along the parent chain stored in `_nodes`. Used by the patch routine to
+   * resolve the new content of an `updated` block (whose position is stable)
+   * or to reach a dirty slot's parent (whose own position is also stable).
+   *
+   * Returns `null` if any node along the chain is missing or if the chain
+   * does not match `next` (which would indicate index drift — should not
+   * happen if `applyOperation`'s contract is honored).
+   */
+  private findInNext(id: BlockId, next: Block[]): Block | null {
+    if (!this._nodes.has(id)) return null
+
+    const chain: { slot: string | null; index: number }[] = []
+    let currentId: BlockId | null = id
+    while (currentId !== null) {
+      const n = this._nodes.get(currentId)
+      if (!n) return null
+      chain.push({ slot: n.slot, index: n.index })
+      currentId = n.parentId
+    }
+    chain.reverse()
+
+    let currentArray: Block[] = next
+    let result: Block | null = null
+    for (let i = 0; i < chain.length; i++) {
+      const entry = chain[i]
+      if (!entry) return null
+      const block = currentArray[entry.index]
+      if (!block) return null
+      result = block
+      const childEntry = chain[i + 1]
+      if (childEntry === undefined) break
+      if (childEntry.slot === null) return null
+      const innerSlot = block.slots?.[childEntry.slot]
+      if (innerSlot === undefined) return null
+      currentArray = innerSlot
+    }
+    return result
+  }
 
   private rebuildIndex(blocks: Block[] = this._blocks.value): void {
     this._nodes.clear()
@@ -208,4 +339,41 @@ const collectIds = (block: Block): Set<BlockId> => {
   }
   walk(block)
   return ids
+}
+
+/**
+ * Slots whose child array reference is different in `next` vs the previous tree.
+ * Re-walking these (and these only) is enough to bring the index in sync.
+ *
+ * - `updateFields` / `replace keepChildren` — no slot array changed.
+ * - `insert` — the target slot got a new array.
+ * - `remove` — the parent slot of the removed block got a new array. We read
+ *   its SlotKey from the inverse op (which is an `insert` carrying the original
+ *   target slot).
+ * - `reorder` — the reordered slot got a new array.
+ * - `move` — both source slot (from the inverse) and target slot got new
+ *   arrays. Deduped if equal (intra-slot move).
+ * - `replace !keepChildren` — every slot of the new block carries new children.
+ */
+const computeDirtySlots = (op: TreeOperation, inverse: TreeOperation): SlotKey[] => {
+  switch (op.op) {
+    case 'updateFields':
+      return []
+    case 'insert':
+      return [op.target.slot]
+    case 'remove':
+      return inverse.op === 'insert' ? [inverse.target.slot] : []
+    case 'reorder':
+      return [op.slot]
+    case 'move': {
+      const slots: SlotKey[] = [op.target.slot]
+      if (inverse.op === 'move' && inverse.target.slot !== op.target.slot) {
+        slots.push(inverse.target.slot)
+      }
+      return slots
+    }
+    case 'replace':
+      if (op.keepChildren) return []
+      return Object.keys(op.block.slots ?? {}).map((s) => `${op.id}:${s}` as SlotKey)
+  }
 }
