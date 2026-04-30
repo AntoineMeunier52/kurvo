@@ -30,4 +30,15 @@ export interface BlockNode {
   slot: string | null
   /** Position of the block inside its parent slot (or root array). */
   index: number
+  /**
+   * Distance from the document root, measured in nesting levels.
+   *  - `0` for blocks living at the page root (direct children of the
+   *    virtual root, i.e. `parentId === null`).
+   *  - `parent.depth + 1` for nested blocks.
+   *
+   * Cached during indexing so consumers don't have to walk the parent chain
+   * to answer "how deep is this block". Maintained by every BlockTree
+   * mutation (insert / remove / move / reorder / replace).
+   */
+  depth: number
 }

@@ -73,6 +73,20 @@ export class PageTree {
   }
 
   /**
+   * Nesting depth of `id` (within whichever slot tree holds it). Same
+   * semantics as {@link BlockTree.depth} — root-level = 0, nested = parent
+   * + 1. Note: depth is local to the slot tree, so a block at the root of
+   * the `header` slot and one at the root of the `main` slot both report 0.
+   */
+  depth(id: BlockId): number | null {
+    for (const tree of this._slots.values()) {
+      const d = tree.depth(id)
+      if (d !== null) return d
+    }
+    return null
+  }
+
+  /**
    * Reactive ref to the block carrying `id`, looked up in whichever slot
    * currently holds it. The ref delegates to the underlying slot tree's
    * `signal`, so it integrates with that tree's notification routine.

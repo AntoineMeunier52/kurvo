@@ -114,6 +114,20 @@ export class BlockTree {
   }
 
   /**
+   * Nesting depth of `id`, measured from the page root. `0` for blocks
+   * sitting directly at the root, `parent.depth + 1` for nested ones.
+   * `null` if the id is not in the tree.
+   *
+   * Maintained by every mutation (cached on `BlockNode.depth`) so this is
+   * O(1) — no parent-chain walk.
+   */
+  depth(id: BlockId): number | null {
+    void this._blocks.value
+    const node = this._nodes.get(id)
+    return node?.depth ?? null
+  }
+
+  /**
    * Slot path from the document root down to `id`, e.g.
    * `['root:default', 'p:cta', 'a:inner']` for a block nested two levels deep.
    *
@@ -311,17 +325,22 @@ export class BlockTree {
     let slotChildren: Block[]
     let nodeParentId: BlockId | null
     let nodeSlot: string | null
+    let depth: number
 
     if (parentId === ROOT_BLOCK_ID) {
       slotChildren = next
       nodeParentId = null
       nodeSlot = null
+      depth = 0
     } else {
       const parentBlock = this.findInTree(parentId, next)
       if (parentBlock === null) return
+      const parentNode = this._nodes.get(parentId)
+      if (parentNode === undefined) return
       slotChildren = parentBlock.slots?.[slotName] ?? []
       nodeParentId = parentId
       nodeSlot = slotName
+      depth = parentNode.depth + 1
     }
 
     for (let i = 0; i < slotChildren.length; i++) {
@@ -331,10 +350,11 @@ export class BlockTree {
         parentId: nodeParentId,
         slot: nodeSlot,
         index: i,
+        depth,
       })
       if (child.slots) {
         for (const [innerSlotName, innerChildren] of Object.entries(child.slots)) {
-          this.indexBlocks(innerChildren, child.id, innerSlotName)
+          this.indexBlocks(innerChildren, child.id, innerSlotName, depth + 1)
         }
       }
     }
@@ -397,7 +417,12 @@ export class BlockTree {
     this.indexBlocks(blocks, null, null)
   }
 
-  private indexBlocks(blocks: Block[], parentId: BlockId | null, slot: string | null): void {
+  private indexBlocks(
+    blocks: Block[],
+    parentId: BlockId | null,
+    slot: string | null,
+    depth = 0,
+  ): void {
     // Invariant: a block lives at the document root (parentId === null) iff it has no slot
     // (slot === null). The spine helpers in applyOperation rely on this invariant to
     // reconstruct SlotKeys from LocatorInfo without an extra branch.
@@ -409,10 +434,10 @@ export class BlockTree {
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i]
       if (!block) continue
-      this._nodes.set(block.id, { parentId, slot, index: i })
+      this._nodes.set(block.id, { parentId, slot, index: i, depth })
       if (block.slots) {
         for (const [slotName, children] of Object.entries(block.slots)) {
-          this.indexBlocks(children, block.id, slotName)
+          this.indexBlocks(children, block.id, slotName, depth + 1)
         }
       }
     }
@@ -487,11 +512,17 @@ const computeDirtySlots = (op: TreeOperation, inverse: TreeOperation): SlotKey[]
     case 'reorder':
       return [op.slot]
     case 'move': {
-      const slots: SlotKey[] = [op.target.slot]
-      if (inverse.op === 'move' && inverse.target.slot !== op.target.slot) {
-        slots.push(inverse.target.slot)
+      // Source FIRST, then target. Removing the source shifts the indices of
+      // its later siblings in the source slot. If the target's ancestor chain
+      // passes through one of those shifted siblings, reindexing the target
+      // slot first would have `findInTree` walk via still-stale indices and
+      // throw "index drift". Reindexing the source slot first refreshes those
+      // indices in `_nodes`, so the target-side walk sees fresh positions.
+      const sourceSlot = inverse.op === 'move' ? inverse.target.slot : undefined
+      if (sourceSlot !== undefined && sourceSlot !== op.target.slot) {
+        return [sourceSlot, op.target.slot]
       }
-      return slots
+      return [op.target.slot]
     }
     case 'replace':
       if (op.keepChildren) return []
