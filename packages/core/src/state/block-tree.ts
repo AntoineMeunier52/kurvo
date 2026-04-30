@@ -10,7 +10,7 @@ import type {
 import { ROOT_BLOCK_ID, ROOT_SLOT_KEY } from '../types'
 import type { BlockNode } from '../types/block-node'
 import { applyOperation } from './apply-operation'
-import { shallowRef, type Reactive } from './reactive'
+import { shallowRef, triggerRef, untracked, type Reactive, type ShallowRef } from './reactive'
 
 /**
  * Reactive wrapper around an immutable block tree, with a manually-maintained
@@ -34,6 +34,14 @@ import { shallowRef, type Reactive } from './reactive'
 export class BlockTree {
   private _blocks = shallowRef<Block[]>([])
   private _nodes: Map<BlockId, BlockNode> = new Map()
+  /**
+   * Per-id reactive signals, lazily created by {@link signal}. Stored as
+   * `ShallowRef<Block | null>` because Block is a tree of plain objects we
+   * want to compare by reference, not deep-track field-by-field. The shallow
+   * trigger fires whenever we replace `.value` with a new ref produced by
+   * `applyOperation`'s spine rebuild.
+   */
+  private _signals: Map<BlockId, ShallowRef<Block | null>> = new Map()
 
   constructor(initial: Block[] = []) {
     this._blocks.value = structuredClone(initial)
@@ -71,6 +79,38 @@ export class BlockTree {
     const node = this._nodes.get(id)
     if (!node || node.parentId === null) return null
     return this.findInTree(node.parentId, this._blocks.value)
+  }
+
+  /**
+   * Stable reactive ref to the block carrying `id`. The returned ref's
+   * `.value` tracks the live block and is updated only when `id` is touched
+   * by a mutation:
+   *   - block becomes part of the tree (`affected.created`) → `value` swaps
+   *     from `null` (or absent) to the new block ref;
+   *   - content changes (`affected.updated`) → `value` swaps to the fresh
+   *     block ref produced by the spine rebuild;
+   *   - position changes (`affected.moved`) → `value` swaps to the new ref;
+   *   - block leaves the tree (`affected.removed`) → `value` becomes `null`.
+   *
+   * Same `id` always returns the same ref instance (memoized) so a Vue
+   * component can keep a stable reference across renders.
+   *
+   * Use this for fine-grained editor reactivity: typing in one block's
+   * fields fires only the signals of blocks listed in `affected`, leaving
+   * the other 999-of-1000 components in a large page untouched.
+   */
+  signal(id: BlockId): ShallowRef<Block | null> {
+    let ref = this._signals.get(id)
+    if (!ref) {
+      // Reading `_blocks.value` here would otherwise track the calling effect
+      // against the global blocks ref — defeating the per-id granularity (every
+      // op flips `_blocks.value` and would re-trigger every signal subscriber).
+      // Wrap the lookup in `untracked` so signal creation registers no deps.
+      const initial = untracked(() => this.findInTree(id, this._blocks.value))
+      ref = shallowRef<Block | null>(initial)
+      this._signals.set(id, ref)
+    }
+    return ref
   }
 
   /**
@@ -160,6 +200,9 @@ export class BlockTree {
     // re-running synchronously on the trigger sees a coherent (tree, index) pair.
     this.applyAffectedToIndex(op, inverse, next, affected)
     this._blocks.value = next
+    // Per-id signals fire LAST so subscribers that read `tree.blocks` /
+    // `tree.get(id)` from inside their effect see fully-updated state.
+    this.notifyAffected(affected, next)
     return inverse
   }
 
@@ -200,6 +243,46 @@ export class BlockTree {
    * positions only, not block refs, so a content-only change has no effect on
    * `_nodes`.
    */
+  /**
+   * Refresh per-id reactive signals after an op. Drives fine-grained editor
+   * re-renders: a Vue effect that reads `tree.signal(id).value` re-runs only
+   * when `id` is touched by `affected.{created, updated, moved, removed}`.
+   *
+   * Ordering note: this runs AFTER `_blocks.value = next` (the global trigger)
+   * so any effect that reads both the global blocks list and the per-id ref
+   * sees consistent state.
+   */
+  private notifyAffected(affected: AffectedBlocks, next: Block[]): void {
+    // `created` / `updated` produce a fresh Block reference for the watched
+    // id (spine rebuild + new fields/slots), so a plain assignment is enough
+    // to fire `ShallowRef`'s strict-equality trigger.
+    for (const id of [...affected.created, ...affected.updated]) {
+      const ref = this._signals.get(id)
+      if (!ref) continue
+      ref.value = this.findInTree(id, next)
+    }
+
+    // `moved` preserves the Block's identity (the spine just splices the same
+    // ref into a new slot) — `ref.value = sameRef` would be a no-op for the
+    // `ShallowRef` trigger. Force a fire via `triggerRef` so subscribers that
+    // rely on position (e.g. re-reading `getParent` / `getPath`) still update.
+    for (const id of affected.moved) {
+      const ref = this._signals.get(id)
+      if (!ref) continue
+      ref.value = this.findInTree(id, next)
+      triggerRef(ref)
+    }
+
+    // `removed` flips the value to null. The ref stays in `_signals` so any
+    // component still holding it observes a stable `null`. If the same id
+    // were ever re-introduced (rare — ids are nanoid-unique in practice),
+    // the existing ref would simply be reused with the new block as its value.
+    for (const id of affected.removed) {
+      const ref = this._signals.get(id)
+      if (ref) ref.value = null
+    }
+  }
+
   private applyAffectedToIndex(
     op: TreeOperation,
     inverse: TreeOperation,

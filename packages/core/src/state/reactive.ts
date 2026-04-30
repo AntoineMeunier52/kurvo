@@ -29,6 +29,8 @@ import {
   toRefs as vueToRefs,
   triggerRef as vueTriggerRef,
   unref as vueUnref,
+  pauseTracking as vuePauseTracking,
+  resetTracking as vueResetTracking,
   watch as vueWatch,
 } from '@vue/reactivity'
 
@@ -69,6 +71,23 @@ export const unref = vueUnref
 export const toRef = vueToRef
 export const toRefs = vueToRefs
 export const markRaw = vueMarkRaw
+
+/**
+ * Run `fn` without registering reactive dependencies on any value it reads.
+ * Useful for "look up the current value of X without subscribing to X".
+ *
+ * Wraps `pauseTracking` / `resetTracking` and guarantees `resetTracking` runs
+ * even if `fn` throws (so a failure inside `untracked` cannot leave the tracker
+ * paused for the remainder of the effect).
+ */
+export const untracked = <T>(fn: () => T): T => {
+  vuePauseTracking()
+  try {
+    return fn()
+  } finally {
+    vueResetTracking()
+  }
+}
 
 // Types
 
