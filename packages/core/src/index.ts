@@ -15,3 +15,4 @@ export {
 
 export { BlockTree } from './state/block-tree'
 export { PageTree } from './state/page-tree'
+export { History } from './state/history'
